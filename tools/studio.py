@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import console  # noqa: F401  (设置 UTF-8 控制台)
 import animations as anims_mod
 import glview
 import scene as scene_mod

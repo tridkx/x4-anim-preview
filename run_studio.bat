@@ -1,10 +1,20 @@
 @echo off
-chcp 65001 >nul
+rem X4 animation preview - launcher. Keep CRLF line endings!
 cd /d "%~dp0"
-python tools\studio.py %*
+
+where python >nul 2>nul
+if errorlevel 1 (
+  echo [ERROR] Python not found in PATH.
+  echo         Install Python 3.10+ or add it to PATH, then retry.
+  pause
+  exit /b 1
+)
+
+python "tools\studio.py" %*
 if errorlevel 1 (
   echo.
-  echo [启动失败] 上面是错误信息。若提示缺少模块，请先运行:
-  echo     pip install -r requirements.txt
+  echo [FAILED] See the message above.
+  echo If a module is missing, run:  pip install -r requirements.txt
+  echo If the game is not found, set X4_GAME_DIR or edit config.json.
   pause
 )

@@ -12,10 +12,17 @@
 
 ## 运行方式
 
-| 方式 | 命令 | 适合 |
+| 方式 | 怎么做 | 说明 |
 |---|---|---|
-| **图形界面**（推荐） | 双击 `run_studio.bat`，或 `python tools/studio.py` | 日常检查：窗口里直接选 mod、搜动画、拖时间轴 |
-| 命令行 | `python tools/viewer.py --mod <目录>` | 脚本化、批处理、快速看一眼 |
+| **快捷方式**（最稳） | `python tools/make_shortcut.py --desktop`，然后双击生成的快捷方式 | 直接指向 `pythonw.exe`，不经过任何文件关联，也不弹控制台 |
+| 批处理 | 双击 `run_studio.bat` | 想看到日志和报错时用 |
+| 命令行 | `python tools/studio.py` | 图形界面，终端用户 |
+| 命令行（无界面） | `python tools/viewer.py --mod <目录>` | 脚本化、批处理、出图 |
+
+> **为什么推荐生成快捷方式**：`.py` 的文件关联在很多机器上被 Visual Studio 接管，
+> 双击会打开 IDE 而不是运行脚本；`.bat` 则容易被别的软件抢关联，而且必须是 CRLF
+> 行尾（LF 行尾的 bat 会被 cmd 解析错位，比如把 `studio.py` 拆成 `stud` + `o.py`）。
+> 快捷方式绕开这一切。
 
 ---
 
@@ -35,11 +42,13 @@ macro 只挑 head / torso / props 三个**网格**槽位。所以：
 ```bash
 pip install -r requirements.txt        # numpy / pillow / pyglet
 cp config.example.json config.json     # 按需改 game_dir（也可用环境变量 X4_GAME_DIR）
+
+python tools/make_shortcut.py --desktop   # 生成快捷方式，之后双击即可
 ```
 
 ### 图形界面（推荐）
 
-双击 **`run_studio.bat`**，或者：
+双击生成的快捷方式，或者：
 
 ```bash
 python tools/studio.py
@@ -166,11 +175,13 @@ python tools/skeleton_check.py --mod /path/to/your/mod
 ## 8. 目录
 
 ```
-run_studio.bat      双击启动图形界面
+run_studio.bat      双击启动图形界面（CRLF 行尾，别改成 LF）
 tools/
   studio.py         图形界面（tkinter 控制面板 + 独立 3D 窗口）   <- 推荐入口
   viewer.py         命令行预览 / 批量出图
   scene.py          资产定位、场景组装、自动发现 mod 目录
+  make_shortcut.py  生成 Windows 快捷方式（绕开文件关联问题）
+  console.py        统一 UTF-8 控制台（GBK 下打印 ✓ 会直接崩）
   glview.py         OpenGL 视图层：轨道相机、绘制、可手动步进的窗口
   x4game.py         游戏目录探测 + .cat/.dat 随机读取
   xac.py            .xac 解析（骨架 / 网格 / UV / 骨骼权重）

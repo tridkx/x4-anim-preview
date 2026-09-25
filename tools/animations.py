@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import console  # noqa: F401  (设置 UTF-8 控制台)
 from x4game import GameArchive
 
 COMPONENTS_XML = "libraries/character_components.xml"

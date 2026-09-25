@@ -1,0 +1,5 @@
+# bat/cmd 必须是 CRLF，否则 cmd.exe 解析会出错（会把 studio.py 拆成 stud + o.py）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
