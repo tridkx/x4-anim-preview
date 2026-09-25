@@ -6,11 +6,16 @@
 这个工具直接读游戏里的 `.xsm` 动画和 `.xac` 网格，在本地把你的 mod 资产和 vanilla
 **并排播放同一条动画**，关节撕裂、四肢弯错方向、猫步、手/脖子错位这些一眼就能看到。
 
-```
-python tools/viewer.py --mod ../lumine/work/x4_lumine_terran_add
-```
+![界面](docs/screenshot.png)
 
 左边是你的 mod，右边是 vanilla，同一条动画、同一时刻。
+
+## 运行方式
+
+| 方式 | 命令 | 适合 |
+|---|---|---|
+| **图形界面**（推荐） | 双击 `run_studio.bat`，或 `python tools/studio.py` | 日常检查：窗口里直接选 mod、搜动画、拖时间轴 |
+| 命令行 | `python tools/viewer.py --mod <目录>` | 脚本化、批处理、快速看一眼 |
 
 ---
 
@@ -28,36 +33,52 @@ macro 只挑 head / torso / props 三个**网格**槽位。所以：
 ## 2. 快速开始
 
 ```bash
-pip install numpy pillow pyglet
+pip install -r requirements.txt        # numpy / pillow / pyglet
+cp config.example.json config.json     # 按需改 game_dir（也可用环境变量 X4_GAME_DIR）
+```
 
-# 游戏目录：优先读环境变量 X4_GAME_DIR，其次项目根 config.json，最后猜常见安装位置
-cp config.example.json config.json   # 按需改 game_dir
+### 图形界面（推荐）
 
-# 1) 只跑 vanilla，确认工具链正常
-python tools/viewer.py --vanilla
+双击 **`run_studio.bat`**，或者：
 
-# 2) 看一个 mod（自动找目录里的 head/body 的 .xac，并与 vanilla 并排对比）
-python tools/viewer.py --mod /path/to/your/mod
+```bash
+python tools/studio.py
+```
 
-# 3) 指定具体资产
-python tools/viewer.py --body my_body.xac --head my_head.xac
+![控制面板](docs/screenshot-panel.png)
 
-# 4) 不想开窗口？批量出图
+左边是控制面板，右边是独立的三维预览窗口：
+
+1. **选择 mod** —— 自动列出机器上的 mod（游戏 `extensions/` 里的、以及工作区里各工程的
+   输出目录），也支持「浏览…」手动指定；勾上「与 vanilla 并排对比」就左右分屏。
+2. **播放控制** —— 播放/暂停、逐帧、时间轴拖动、速度、循环、**轮播**（自动过一遍所有动画）、
+   网格/骨骼显示、重置相机、一键截图。
+3. **选择动画** —— 该角色 component 的全部动画（默认 186 条），带搜索框过滤。
+
+选择会被记住（`config.json`），下次打开就是你上次看的 mod 和动画。
+
+### 命令行
+
+```bash
+python tools/viewer.py --vanilla                 # 只跑 vanilla，确认工具链正常
+python tools/viewer.py --mod /path/to/your/mod   # 与 vanilla 并排对比
+python tools/viewer.py --body a.xac --head b.xac # 指定具体资产
+
+# 不开窗口，批量出图
 python tools/viewer.py --mod /path/to/mod --anim anim_stand_idle_05 \
     --shot out.png --frames 0,15,30,45
 ```
 
-**操作**
+**窗口操作**
 
 | 键 | 作用 |
 |---|---|
 | 空格 | 播放 / 暂停 |
-| ← → | 上一条 / 下一条动画（共 180+ 条） |
+| ← → | 上一条 / 下一条动画 |
 | `,` `.` | 逐帧后退 / 前进（按 15 fps） |
 | ↑ ↓ | 播放速度 |
-| `B` | 叠加骨骼线框 |
+| `B` | 叠加骨骼线框（穿透显示，便于核对骨架） |
 | `N` | 只看骨架（隐藏网格） |
-| `T` | 姿态模式切换（见 §5） |
 | `R` | 重置相机 |
 | 鼠标拖动 / 滚轮 | 旋转 / 缩放 |
 | `Q` / `ESC` | 退出 |
@@ -145,15 +166,23 @@ python tools/skeleton_check.py --mod /path/to/your/mod
 ## 8. 目录
 
 ```
+run_studio.bat      双击启动图形界面
 tools/
+  studio.py         图形界面（tkinter 控制面板 + 独立 3D 窗口）   <- 推荐入口
+  viewer.py         命令行预览 / 批量出图
+  scene.py          资产定位、场景组装、自动发现 mod 目录
+  glview.py         OpenGL 视图层：轨道相机、绘制、可手动步进的窗口
   x4game.py         游戏目录探测 + .cat/.dat 随机读取
   xac.py            .xac 解析（骨架 / 网格 / UV / 骨骼权重）
   xsm.py            .xsm 解析（关键帧曲线）
   rig.py            正向运动学 + 线性混合蒙皮
   animations.py     component -> 动画清单
-  viewer.py         实时预览器 / 批量出图    <- 主入口
   skeleton_check.py 骨架一致性校验
   render.py         纯 numpy 软光栅（离线出图用）
 examples/
   offline_check.py  不开窗口跑一遍并出图的最小示例
 ```
+
+图形界面用的是 tkinter（Python 自带）做控制面板、pyglet 单独开三维窗口，
+两者共享一个线程：tkinter 的 `after` 循环每帧调用 `PreviewWindow.pump()`
+手动步进 pyglet，因此不需要两套事件循环，也不用加锁。
