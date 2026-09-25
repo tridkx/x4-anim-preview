@@ -1,0 +1,4 @@
+{
+  "_comment": "把本文件复制成 config.json。game_dir 可以写相对本文件的路径，也可以是绝对路径；也可以改用环境变量 X4_GAME_DIR。",
+  "game_dir": "D:/SteamLibrary/steamapps/common/X4 Foundations"
+}
