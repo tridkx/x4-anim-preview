@@ -59,7 +59,9 @@ python tools/studio.py
 左边是控制面板，右边是独立的三维预览窗口：
 
 1. **选择 mod** —— 自动列出机器上的 mod（游戏 `extensions/` 里的、以及工作区里各工程的
-   输出目录），也支持「浏览…」手动指定；勾上「与 vanilla 并排对比」就左右分屏。
+   输出目录），也支持「浏览…」手动指定。勾上「并排对比」后，**对比对象可以选 vanilla，
+   也可以选另一个 mod**——改一版看一版时，跟上一版比通常比跟 vanilla 比更有用。
+   改完资产点「重载」即可，不用切来切去。
 2. **播放控制** —— 播放/暂停、逐帧、时间轴拖动、速度、循环、**轮播**（自动过一遍所有动画）、
    网格/骨骼显示、重置相机、一键截图。
 3. **选择动画** —— 该角色 component 的全部动画（默认 186 条），带搜索框过滤。
@@ -72,6 +74,7 @@ python tools/studio.py
 python tools/viewer.py --vanilla                 # 只跑 vanilla，确认工具链正常
 python tools/viewer.py --mod /path/to/your/mod   # 与 vanilla 并排对比
 python tools/viewer.py --body a.xac --head b.xac # 指定具体资产
+python tools/viewer.py --mod <新版> --compare-mod <上一版>   # 两个 mod 并排（迭代时最有用）
 
 # 不开窗口，批量出图
 python tools/viewer.py --mod /path/to/mod --anim anim_stand_idle_05 \

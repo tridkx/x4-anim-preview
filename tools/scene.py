@@ -67,6 +67,18 @@ def guess_mod_parts(mod_dir: Path):
     return heads, torsos
 
 
+def load_mod_sources(mod_dir: Path, limit: int = 2):
+    """按槽位挑出要加载的资产，返回 ``[(文件名, 字节)]``。
+
+    优先 head + torso 各一个；认不出槽位就退化成前 ``limit`` 个 .xac。
+    """
+    heads, torsos = guess_mod_parts(Path(mod_dir))
+    picked = heads[:1] + torsos[:1]
+    if not picked:
+        picked = [p for p, _ in mod_asset_options(mod_dir)[:limit]]
+    return [(p.name, p.read_bytes()) for p in picked]
+
+
 def mod_asset_options(mod_dir: Path):
     """返回该目录下所有 .xac 及其槽位，供界面列出。"""
     out = []

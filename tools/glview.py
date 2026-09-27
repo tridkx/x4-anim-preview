@@ -358,6 +358,10 @@ class PreviewWindow:
     def close(self):
         if not self._closed:
             self._closed = True
+            try:
+                self.window.switch_to()
+            except Exception:
+                pass
             for painter in self.painters:
                 painter.dispose()
             try:
@@ -369,6 +373,10 @@ class PreviewWindow:
 
     def set_scenes(self, scenes):
         """替换显示的资产（动画时长变了要同步）。"""
+        try:
+            self.window.switch_to()      # glDeleteTextures 必须在自己的上下文里做
+        except Exception:
+            pass
         for painter in self.painters:
             painter.dispose()
         self.scenes = scenes

@@ -305,20 +305,25 @@ def _parse_curves(data: bytes, kd_start: int, layout: Layout, pos_frames: int, r
 
 
 def _find_first(data: bytes, window: int = 1 << 16):
-    """在文件头部找第一条记录并判定布局。"""
-    for off, name in _scan_names(data, 0x20, window):
-        if off - 128 < 0:
-            continue
-        for layout in LAYOUTS:
-            counts = _read_counts(data, off, layout)
-            if counts is None:
+    """找第一条记录并判定布局。先在头部窗口里找（绝大多数文件如此），
+    找不到再退回全文件扫描——不能因为第一条记录偏后就整个文件解析失败。
+    """
+    for stop in (window, len(data)):
+        for off, name in _scan_names(data, 0x20, stop):
+            if off - 128 < 0:
                 continue
-            kd_start = off + 4 + len(name)
-            kd = layout.key_bytes(counts)
-            if kd_start + kd + layout.header_size > len(data):
-                continue
-            if _align_next(data, kd_start + kd + layout.header_size) is not None:
-                return off, layout
+            for layout in LAYOUTS:
+                counts = _read_counts(data, off, layout)
+                if counts is None:
+                    continue
+                kd_start = off + 4 + len(name)
+                kd = layout.key_bytes(counts)
+                if kd_start + kd + layout.header_size > len(data):
+                    continue
+                if _align_next(data, kd_start + kd + layout.header_size) is not None:
+                    return off, layout
+        if stop >= len(data):
+            break
     return None, None
 
 

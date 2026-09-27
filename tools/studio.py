@@ -84,6 +84,7 @@ class StudioApp:
         self.mod_var = tk.StringVar()
         self.search_var = tk.StringVar()
         self.compare_var = tk.BooleanVar(value=bool(cfg.get("compare", True)))
+        self.compare_target_var = tk.StringVar(value=cfg.get("compare_target", "vanilla"))
         self.bones_var = tk.BooleanVar(value=False)
         self.mesh_var = tk.BooleanVar(value=True)
         self.textures_var = tk.BooleanVar(value=bool(cfg.get("textures", True)))
@@ -142,8 +143,15 @@ class StudioApp:
 
         row2 = ttk.Frame(box)
         row2.pack(fill="x", pady=(6, 0))
-        ttk.Checkbutton(row2, text="与 vanilla 并排对比", variable=self.compare_var,
+        ttk.Checkbutton(row2, text="并排对比", variable=self.compare_var,
                         command=self.rebuild).pack(side="left")
+        ttk.Label(row2, text="对象").pack(side="left", padx=(6, 2))
+        self.compare_combo = ttk.Combobox(row2, textvariable=self.compare_target_var,
+                                          values=["vanilla"], state="readonly", width=18)
+        self.compare_combo.pack(side="left", fill="x", expand=True)
+        self.compare_combo.bind("<<ComboboxSelected>>",
+                                lambda e: (save_config({"compare_target": self.compare_target_var.get()}),
+                                           self.rebuild()))
 
         row3 = ttk.Frame(box)
         row3.pack(fill="x", pady=(4, 0))
@@ -270,6 +278,10 @@ class StudioApp:
         self.mod_dirs = dirs
         labels = ["（只用 vanilla 基准）"] + [label for label, _ in dirs]
         self.mod_combo.configure(values=labels)
+        targets = ["vanilla"] + [label for label, _ in dirs]
+        self.compare_combo.configure(values=targets)
+        if self.compare_target_var.get() not in targets:
+            self.compare_target_var.set("vanilla")
         if not self.mod_var.get() or self.mod_var.get() not in labels:
             want = self.cfg.get("last_mod")
             pick = None
@@ -320,9 +332,24 @@ class StudioApp:
                 new_scenes.append(scene_mod.Scene("mod", sources, textures=tex,
                                                   material_rules=rules))
             if self.compare_var.get() or not new_scenes:
-                van = self._vanilla_sources()
-                if van:
-                    new_scenes.append(scene_mod.Scene("vanilla", van))
+                target = self.compare_target_var.get()
+                other_dir = None
+                for lab, path in getattr(self, "mod_dirs", []):
+                    if lab == target:
+                        other_dir = path
+                if other_dir is not None:
+                    # 与另一个 mod 对比：迭代时"上一版 vs 这一版"比对着 vanilla 更有用
+                    src = scene_mod.load_mod_sources(other_dir)
+                    if src:
+                        ots = scene_mod.TextureSet([other_dir], warn=self._set_status)
+                        new_scenes.append(scene_mod.Scene(
+                            f"mod:{other_dir.name}", src,
+                            textures=ots if len(ots) else None,
+                            material_rules=scene_mod.MaterialRules([other_dir])))
+                else:
+                    van = self._vanilla_sources()
+                    if van:
+                        new_scenes.append(scene_mod.Scene("vanilla", van))
         except Exception as exc:
             messagebox.showerror("加载失败", str(exc))
             return
@@ -528,6 +555,7 @@ class StudioApp:
             "compare": self.compare_var.get(),
             "component": self.component_var.get(),
             "textures": self.textures_var.get(),
+            "compare_target": self.compare_target_var.get(),
         })
         if self.preview and not self.preview.closed:
             self.preview.close()
@@ -606,6 +634,11 @@ def main(argv=None):
                     app.anim_list.selection_set(i)
                     app.on_pick_anim()
                     steps.append(f"动画 {app.shown[i].name}")
+            targets = list(app.compare_combo.cget("values"))
+            if len(targets) > 1:
+                app.compare_target_var.set(targets[1])
+                app.rebuild()
+                steps.append(f"对比对象 -> {targets[1]}")
             app.bones_var.set(True)
             app.sync_state()
             steps.append("开骨骼显示")

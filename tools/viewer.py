@@ -48,13 +48,9 @@ def build_scenes(args, game) -> list[scene_mod.Scene]:
         mod_dir = Path(args.mod)
         if not mod_dir.exists():
             raise SystemExit(f"mod 目录不存在: {mod_dir}")
-        heads, torsos = scene_mod.guess_mod_parts(mod_dir)
-        picked = heads[:1] + torsos[:1]
-        if not picked:
-            picked = [p for p, _ in scene_mod.mod_asset_options(mod_dir)[:2]]
-        if not picked:
+        mod_sources = scene_mod.load_mod_sources(mod_dir)
+        if not mod_sources:
             raise SystemExit(f"{mod_dir} 下没找到 .xac")
-        mod_sources = [(p.name, p.read_bytes()) for p in picked]
 
     if mod_sources:
         tex = rules = None
@@ -65,7 +61,21 @@ def build_scenes(args, game) -> list[scene_mod.Scene]:
                 tex = ts if len(ts) else None
         scenes.append(scene_mod.Scene("mod", mod_sources, delta=args.delta,
                                       textures=tex, material_rules=rules))
-    if args.vanilla or mod_sources:
+    if args.compare_mod:
+        # 与另一个 mod 对比：迭代时看"上一版 vs 这一版"比看 vanilla 更有用
+        other = Path(args.compare_mod)
+        if not other.is_dir():
+            raise SystemExit(f"对比 mod 目录不存在: {other}")
+        src = scene_mod.load_mod_sources(other)
+        if src:
+            tex = rules = None
+            rules = scene_mod.MaterialRules([other])
+            if not args.no_textures:
+                ts = scene_mod.TextureSet([other])
+                tex = ts if len(ts) else None
+            scenes.append(scene_mod.Scene(f"mod:{other.name}", src, delta=args.delta,
+                                          textures=tex, material_rules=rules))
+    elif args.vanilla or mod_sources:
         van = []
         for ref in (args.vanilla_head or scene_mod.DEFAULT_HEAD,
                     args.vanilla_body or scene_mod.DEFAULT_BODY):
@@ -203,6 +213,7 @@ def run_shots(scenes, anim_list, game, out: str, frames: list[float], args) -> i
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="X4 角色动画预览器（命令行版）")
     ap.add_argument("--mod", help="mod 目录（自动找 head/torso 的 .xac）")
+    ap.add_argument("--compare-mod", help="与另一个 mod 并排对比（不给则对比 vanilla）")
     ap.add_argument("--body", nargs="*", help="躯干 .xac（磁盘路径或游戏包内路径）")
     ap.add_argument("--head", nargs="*", help="头部 .xac")
     ap.add_argument("--vanilla", action="store_true", help="只加载 vanilla 做基准")
