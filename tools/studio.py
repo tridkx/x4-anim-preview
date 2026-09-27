@@ -79,6 +79,10 @@ class StudioApp:
         self._updating_scale = False
         self._status = "就绪"
         self._closing = False
+        #: 模态对话框（选目录等）期间为 True——此时**不能**再驱动 pyglet。
+        #: tkinter 的原生模态框有自己的消息循环，我们再往里塞 dispatch_events
+        #: 会两边抢消息，表现就是界面卡死。
+        self._modal = False
 
         self.component_var = tk.StringVar(value=cfg.get("component", "character_argon_female_01"))
         self.mod_var = tk.StringVar()
@@ -307,8 +311,25 @@ class StudioApp:
                 out.append(got)
         return out
 
+    def _modal_call(self, fn, *args, **kwargs):
+        """所有会弹出**模态**对话框的调用都要走这里。
+
+        tkinter 的原生模态框（选目录、消息框）自带消息循环，而我们的主循环
+        每 16ms 会去驱动一次 pyglet 窗口。两边同时抢消息就会卡死——
+        所以模态期间必须停掉 pyglet 那一侧。
+        """
+        self._modal = True
+        try:
+            self.root.update_idletasks()
+            return fn(*args, **kwargs)
+        finally:
+            self._modal = False
+
     def rebuild(self):
-        """按当前选择重建场景并（必要时）创建预览窗口。"""
+        """按当前选择重建场景。"""
+        self._rebuild_now()
+
+    def _rebuild_now(self):
         sources: list[tuple[str, bytes]] = []
         mod_dir = self.current_mod_dir()
         if mod_dir is not None:
@@ -351,7 +372,7 @@ class StudioApp:
                     if van:
                         new_scenes.append(scene_mod.Scene("vanilla", van))
         except Exception as exc:
-            messagebox.showerror("加载失败", str(exc))
+            self._modal_call(messagebox.showerror, "加载失败", str(exc))
             return
 
         if not new_scenes:
@@ -487,12 +508,20 @@ class StudioApp:
             self._set_status(f"截图失败：{exc}")
 
     def on_browse(self):
-        d = filedialog.askdirectory(title="选择 mod 目录（含 .xac）")
+        start = self.cfg.get("last_browse") or str(self.current_mod_dir() or Path.home())
+        d = self._modal_call(
+            filedialog.askdirectory,
+            parent=self.root, title="选择 mod 目录（含 .xac）",
+            mustexist=True, initialdir=start,
+        )
         if not d:
             return
+        save_config({"last_browse": d})
         label = f"[手动] {Path(d).name}"
         self.mod_dirs = list(getattr(self, "mod_dirs", [])) + [(label, Path(d))]
-        self.mod_combo.configure(values=["（只用 vanilla 基准）"] + [l for l, _ in self.mod_dirs])
+        labels = ["（只用 vanilla 基准）"] + [l for l, _ in self.mod_dirs]
+        self.mod_combo.configure(values=labels)
+        self.compare_combo.configure(values=["vanilla"] + [l for l, _ in self.mod_dirs])
         self.mod_var.set(label)
         self.on_mod_change()
 
@@ -562,8 +591,16 @@ class StudioApp:
         self.root.destroy()
 
     # -- 主循环 -----------------------------------------------------------
+    def _should_pump(self) -> bool:
+        """模态框开着时不驱动 pyglet（见 _modal_call 的说明）。"""
+        return not self._modal and self.preview is not None and not self.preview.closed
+
     def _tick(self):
         if self._closing:
+            return
+        if not self._should_pump():
+            # 模态框开着（或没有预览窗）时只维持 tkinter 自己转
+            self.root.after(50 if self._modal else 16, self._tick)
             return
         if self.preview is not None and not self.preview.closed:
             alive = self.preview.pump()
@@ -639,6 +676,27 @@ def main(argv=None):
                 app.compare_target_var.set(targets[1])
                 app.rebuild()
                 steps.append(f"对比对象 -> {targets[1]}")
+            # 走一遍完整的"浏览"路径：把对话框换成一个假返回值，
+            # 验证 选目录 -> 更新下拉 -> 重建场景 这条链没问题
+            target = None
+            for lab, path in getattr(app, "mod_dirs", []):
+                if "lumine" in lab.lower() and "terran" in lab.lower():
+                    target = path
+            if target is not None:
+                real = filedialog.askdirectory
+                filedialog.askdirectory = lambda **kw: str(target)
+                try:
+                    app.on_browse()
+                    steps.append(f"浏览 -> {target.name}")
+                finally:
+                    filedialog.askdirectory = real
+
+            # 验证模态期间不会去 pump pyglet（"浏览"卡死就是这个原因）。
+            # 注意别直接调 _tick——它会再注册一个 after 回调，攒起来会互相打架。
+            app._modal = True
+            modal_ok = not app._should_pump()
+            app._modal = False
+            steps.append(f"模态期间跳过 pump: {modal_ok}")
             app.bones_var.set(True)
             app.sync_state()
             steps.append("开骨骼显示")

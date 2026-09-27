@@ -503,8 +503,13 @@ class PreviewWindow:
         try:
             self.window.dispatch_events()
         except Exception:
-            self.close()
-            return False
+            # 偶发一次（比如和别的模态循环撞上）不该直接关窗口；连续出错才收摊
+            self._errors = getattr(self, "_errors", 0) + 1
+            if self._errors > 8:
+                self.close()
+                return False
+            return True
+        self._errors = 0
         if self._closed:
             return False
         self.state.advance(dt, self.duration)
