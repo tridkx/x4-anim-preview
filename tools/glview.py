@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pyglet
@@ -51,6 +51,7 @@ class ViewState:
     speed: float = 1.0
     show_mesh: bool = True
     show_bones: bool = False
+    show_textures: bool = True
     loop: bool = True
 
     def advance(self, dt: float, duration: float):
@@ -156,37 +157,136 @@ def draw_floor(lo_y: float, extent: float = 400.0, step: float = 50.0):
     glEnd()
 
 
+def upload_texture(img: np.ndarray) -> int:
+    """把 (H,W,4) uint8 上传成 OpenGL 纹理，返回纹理 id。
+
+    **不要翻行**。X4 的 UV 与图像同向（v=0 在顶部，和软光栅的取样一致），
+    直接上传时纹理坐标 v=0 正好落在数组第 0 行；多翻一次会整张图上下颠倒。
+    """
+    h, w = img.shape[:2]
+    data = np.ascontiguousarray(img, dtype=np.uint8)
+    ids = (GLuint * 1)()
+    glGenTextures(1, ids)
+    tid = int(ids[0])
+    glBindTexture(GL_TEXTURE_2D, tid)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 data.ctypes.data)
+    # 生成 mip 链。发片是 alpha 镂空的：没有 mip 时每根发丝的边缘都在闪，
+    # 放大看是一片噪点；有了 mip 平均掉边缘，发丝才是连续的。
+    try:
+        glGenerateMipmap(GL_TEXTURE_2D)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
+    except Exception:
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    return tid
+
+
 class ScenePainter:
-    """把一个 Scene 的蒙皮结果画到当前 OpenGL 上下文。"""
+    """把一个 Scene 的蒙皮结果画到当前 OpenGL 上下文。
+
+    贴图按 ``(part 序号, 材质 id)`` 缓存——纹理上传只做一次，之后每帧只是绑图。
+    """
 
     def __init__(self, scene):
         self.scene = scene
+        self._tex: dict[tuple[int, int], int] = {}
 
-    def draw(self, t: float, show_mesh: bool = True, show_bones: bool = False):
+    def dispose(self):
+        """释放 OpenGL 纹理。切换 mod 时会重建 painter，不释放就一路泄漏。"""
+        ids = [t for t in self._tex.values() if t]
+        if ids:
+            try:
+                arr = (GLuint * len(ids))(*ids)
+                glDeleteTextures(len(ids), arr)
+            except Exception:
+                pass
+        self._tex.clear()
+
+    def _texture(self, part: int, mat_id: int, img) -> int | None:
+        key = (part, mat_id)
+        tid = self._tex.get(key)
+        if tid is None:
+            try:
+                tid = upload_texture(img)
+            except Exception:
+                tid = 0
+            self._tex[key] = tid
+        return tid or None
+
+    def _draw_one(self, mesh, pos, nrm, faces, uv_src, tex_id):
+        _p, ptr = as_gl(pos)
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glVertexPointer(3, GL_FLOAT, 0, ptr)
+        if nrm is not None:
+            _n, nptr = as_gl(nrm)
+            glEnableClientState(GL_NORMAL_ARRAY)
+            glNormalPointer(GL_FLOAT, 0, nptr)
+        else:
+            glDisableClientState(GL_NORMAL_ARRAY)
+            glNormal3f(0.0, 1.0, 0.0)
+        if tex_id:
+            _t, tptr = as_gl(uv_src)
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY)
+            glTexCoordPointer(2, GL_FLOAT, 0, tptr)
+        idx, iptr = as_gl(np.ascontiguousarray(faces).reshape(-1), np.uint32)
+        glDrawElements(GL_TRIANGLES, int(idx.size), GL_UNSIGNED_INT, iptr)
+        if tex_id:
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glDisableClientState(GL_NORMAL_ARRAY)
+
+    def draw(self, t: float, show_mesh: bool = True, show_bones: bool = False,
+             show_textures: bool = True):
         parts = self.scene.pose(t)
         if show_mesh:
             glEnable(GL_LIGHTING)
             glEnable(GL_DEPTH_TEST)
             glEnable(GL_COLOR_MATERIAL)
             glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+            texmaps = self.scene.part_textures() if show_textures else None
+            if texmaps:
+                glEnable(GL_TEXTURE_2D)
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
             for i, (mesh, pos, nrm) in enumerate(parts):
                 if mesh.faces.size == 0:
                     continue
                 glColor3f(*COLORS[i % len(COLORS)])
-                _p, ptr = as_gl(pos)
-                glEnableClientState(GL_VERTEX_ARRAY)
-                glVertexPointer(3, GL_FLOAT, 0, ptr)
-                if nrm is not None:
-                    _n, nptr = as_gl(nrm)
-                    glEnableClientState(GL_NORMAL_ARRAY)
-                    glNormalPointer(GL_FLOAT, 0, nptr)
+                texmap = texmaps[i] if (texmaps and i < len(texmaps)) else None
+                subs = getattr(mesh, "submesh_material", None)
+                if texmap and subs and mesh.uvs is not None:
+                    for first, count, mat_id in subs:
+                        if count <= 0:
+                            continue
+                        surf = texmap.get(mat_id)
+                        img = getattr(surf, "image", surf)
+                        cut = getattr(surf, "alpha_test", None) if surf is not None else None
+                        tid = self._texture(i, mat_id, img) if img is not None else None
+                        # 按材质决定裁不裁：游戏里只有 p1_hair 有 a<0.5 discard，
+                        # p1_character（皮肤/衣服）完全不裁
+                        if cut is not None:
+                            glEnable(GL_ALPHA_TEST)
+                            glAlphaFunc(GL_GREATER, float(cut))
+                        else:
+                            glDisable(GL_ALPHA_TEST)
+                        if tid:
+                            glBindTexture(GL_TEXTURE_2D, tid)
+                        else:
+                            glBindTexture(GL_TEXTURE_2D, 0)
+                        self._draw_one(mesh, pos, nrm, mesh.faces[first:first + count],
+                                       mesh.uvs, tid)
                 else:
-                    glDisableClientState(GL_NORMAL_ARRAY)
-                    glNormal3f(0.0, 1.0, 0.0)
-                idx, iptr = as_gl(mesh.faces.reshape(-1), np.uint32)
-                glDrawElements(GL_TRIANGLES, int(idx.size), GL_UNSIGNED_INT, iptr)
-                glDisableClientState(GL_VERTEX_ARRAY)
-                glDisableClientState(GL_NORMAL_ARRAY)
+                    glDisable(GL_ALPHA_TEST)
+                    if texmaps:
+                        glBindTexture(GL_TEXTURE_2D, 0)
+                    self._draw_one(mesh, pos, nrm, mesh.faces, None, None)
+            if texmaps:
+                glBindTexture(GL_TEXTURE_2D, 0)
+                glDisable(GL_ALPHA_TEST)
+                glDisable(GL_TEXTURE_2D)
             glDisable(GL_LIGHTING)
         if show_bones:
             # 关掉深度测试：骨骼是辅助信息，被网格挡住就没法核对骨架了
@@ -258,6 +358,8 @@ class PreviewWindow:
     def close(self):
         if not self._closed:
             self._closed = True
+            for painter in self.painters:
+                painter.dispose()
             try:
                 self.window.close()
             except Exception:
@@ -267,6 +369,8 @@ class PreviewWindow:
 
     def set_scenes(self, scenes):
         """替换显示的资产（动画时长变了要同步）。"""
+        for painter in self.painters:
+            painter.dispose()
         self.scenes = scenes
         self.painters = [ScenePainter(s) for s in scenes]
         self.cameras = [OrbitCamera.for_scenes(scenes) for _ in scenes]
@@ -352,8 +456,11 @@ class PreviewWindow:
             vw = w // n
             glViewport(i * vw, 0, vw, h)
             cam.apply(vw, h)
-            draw_floor(float(self.scenes[i].lo[1]))
-            painter.draw(self.state.time, self.state.show_mesh, self.state.show_bones)
+            # 地板固定在世界 Y=0，和 ai_check 的指标口径一致。
+            # 用各场景自己的最低点会让地板跟着模型走，"脚陷进地板"就永远看不出来。
+            draw_floor(0.0)
+            painter.draw(self.state.time, self.state.show_mesh, self.state.show_bones,
+                         self.state.show_textures)
 
         glViewport(0, 0, w, h)
         glMatrixMode(GL_PROJECTION)

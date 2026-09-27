@@ -57,7 +57,14 @@ def build_scenes(args, game) -> list[scene_mod.Scene]:
         mod_sources = [(p.name, p.read_bytes()) for p in picked]
 
     if mod_sources:
-        scenes.append(scene_mod.Scene("mod", mod_sources, delta=args.delta))
+        tex = rules = None
+        if args.mod and Path(args.mod).is_dir():
+            rules = scene_mod.MaterialRules([Path(args.mod)])
+            if not args.no_textures:
+                ts = scene_mod.TextureSet([Path(args.mod)])
+                tex = ts if len(ts) else None
+        scenes.append(scene_mod.Scene("mod", mod_sources, delta=args.delta,
+                                      textures=tex, material_rules=rules))
     if args.vanilla or mod_sources:
         van = []
         for ref in (args.vanilla_head or scene_mod.DEFAULT_HEAD,
@@ -158,28 +165,9 @@ def run_window(scenes, anim_list, game, args) -> int:
     return 0
 
 
-def _mod_textures(scene, mod_dir: Path | None):
-    """给 mod 场景准备「与 pose() 的 parts 一一对应」的贴图表。"""
-    if mod_dir is None or not mod_dir.is_dir():
-        return None
-    ts = scene_mod.TextureSet([mod_dir])
-    if not len(ts):
-        return None
-    out = []
-    for asset in scene.assets:
-        mapping = ts.for_asset(asset)
-        for mesh in asset.meshes:
-            if mesh.vertex_count == 0:
-                continue
-            out.append(mapping)
-    return out
-
-
 def run_shots(scenes, anim_list, game, out: str, frames: list[float], args) -> int:
     import render as soft
 
-    mod_dir = Path(args.mod) if args.mod else None
-    tex_cache: dict[int, list | None] = {}
     images = []
     for ai in (args.anims or [0]):
         ref = anim_list[ai % len(anim_list)]
@@ -195,10 +183,7 @@ def run_shots(scenes, anim_list, game, out: str, frames: list[float], args) -> i
                 azimuth=args.azimuth, elevation=6.0,
                 width=max(args.width // max(len(scenes), 1), 64), height=args.height,
             )
-            if id(s) not in tex_cache:
-                tex_cache[id(s)] = (_mod_textures(s, mod_dir)
-                                    if s.label == "mod" and not args.no_textures else None)
-            tex = tex_cache[id(s)]
+            tex = None if args.no_textures else s.part_textures()
             for t in frames:
                 t = min(t, max(anim.duration - 1e-3, 0.0))
                 img = soft.render(

@@ -87,11 +87,26 @@ def _normalize(v: np.ndarray, axis=-1):
 
 
 def _sample(tex: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
-    """最近邻采样。X4 的 v 轴与图像一致（v=0 在顶部）。"""
+    """双线性采样，UV 按 wrap 处理。X4 的 v 轴与图像一致（v=0 在顶部）。
+
+    发片这类 alpha 镂空几何用最近邻会碎成一片点，双线性能明显改善边缘。
+    """
     h, w = tex.shape[:2]
-    xi = np.clip((np.mod(u, 1.0)) * w, 0, w - 1).astype(np.int32)
-    yi = np.clip((np.mod(v, 1.0)) * h, 0, h - 1).astype(np.int32)
-    return tex[yi, xi]
+    x = np.mod(u, 1.0) * w - 0.5
+    y = np.mod(v, 1.0) * h - 0.5
+    x0 = np.floor(x).astype(np.int64)
+    y0 = np.floor(y).astype(np.int64)
+    fx = (x - x0)[..., None]
+    fy = (y - y0)[..., None]
+    x0m, x1m = np.mod(x0, w), np.mod(x0 + 1, w)
+    y0m, y1m = np.mod(y0, h), np.mod(y0 + 1, h)
+    c00 = tex[y0m, x0m].astype(np.float32)
+    c10 = tex[y0m, x1m].astype(np.float32)
+    c01 = tex[y1m, x0m].astype(np.float32)
+    c11 = tex[y1m, x1m].astype(np.float32)
+    top = c00 + (c10 - c00) * fx
+    bot = c01 + (c11 - c01) * fx
+    return top + (bot - top) * fy
 
 
 def render(
@@ -104,12 +119,15 @@ def render(
     textures: dict | None = None,
     bones=None,
     bone_color=BONE_COLOR,
-    alpha_cutoff: float = 0.35,
+    alpha_cutoff: float = 0.5,
 ) -> Image.Image:
     """``parts`` 是 ``[(mesh, positions, normals), ...]``。
 
-    :param textures: ``{material_id: (H,W,4)}``，或者与 ``parts`` 等长的列表
-                     （每个 part 一张表，用于多资产共用 material_id 的场景）
+    :param textures: ``{material_id: SurfaceTex}``，或者与 ``parts`` 等长的列表
+                     （每个 part 一张表，用于多资产共用 material_id 的场景）。
+                     ``SurfaceTex.alpha_test`` 为 ``None`` 表示该材质**不做** alpha 裁剪
+                     ——这是照游戏 shader 来的：只有 ``p1_hair`` 里写了 ``a < 0.5 discard``，
+                     ``p1_character`` 完全没有裁剪。
     :param bones:    ``[(a, b), ...]`` 世界坐标线段，画在网格之上（穿透显示）
     """
     w, h = camera.width, camera.height
@@ -129,15 +147,17 @@ def render(
         if mesh.faces.size == 0:
             continue
         pos = np.asarray(pos, dtype=np.float64)
-        if tex_list is not None:
-            textures = tex_list[mi] if mi < len(tex_list) else None
+        # 每个 part 用自己的贴图表。注意别覆盖外层的 textures——
+        # 之前就是在这里把它改成"最后一个 part 的表"，结果所有网格都查不到自己的材质
+        part_map = tex_list[mi] if (tex_list is not None and mi < len(tex_list)) else textures
         subs = getattr(mesh, "submesh_material", None)
         if subs:
             for first, count, mat_id in subs:
                 if count > 0:
-                    groups.append((mesh, pos, nrm, mesh.faces[first:first + count], mat_id, mi))
+                    groups.append((mesh, pos, nrm, mesh.faces[first:first + count],
+                                   mat_id, mi, part_map))
         else:
-            groups.append((mesh, pos, nrm, mesh.faces, None, mi))
+            groups.append((mesh, pos, nrm, mesh.faces, None, mi, part_map))
 
     if floor_y is not None:
         g = floor_extent
@@ -148,13 +168,15 @@ def render(
             faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
 
         groups.insert(0, (_Floor(), pts, np.tile(np.array([0.0, 1.0, 0.0]), (4, 1)),
-                          _Floor.faces, None, -1))
+                          _Floor.faces, None, -1, None))
 
-    for mesh, pos, nrm, faces, mat_id, mi in groups:
+    for mesh, pos, nrm, faces, mat_id, mi, part_map in groups:
         base = (58, 60, 68) if mi < 0 else PALETTE[mi % len(PALETTE)]
-        tex = textures.get(mat_id) if (textures and mat_id is not None) else None
+        tex = part_map.get(mat_id) if (part_map and mat_id is not None) else None
         if tex is not None and getattr(mesh, "uvs", None) is None:
             tex = None
+        tex_img = getattr(tex, "image", tex)          # 兼容直接传 ndarray 的调用方
+        tex_cut = getattr(tex, "alpha_test", alpha_cutoff) if tex is not None else None
 
         v = np.concatenate([pos, np.ones((pos.shape[0], 1))], axis=1)
         cam = v @ view.T
@@ -183,8 +205,8 @@ def render(
             shade = np.abs(fn @ light_dir)
         lam = ambient + (1.0 - ambient) * shade
 
-        uv = mesh.uvs[f] if tex is not None else None
-        if tex is None:
+        uv = mesh.uvs[f] if tex_img is not None else None
+        if tex_img is None:
             cols = np.clip(np.array(base, dtype=np.float64)[None, :] / 255.0 * lam[:, None], 0, 1)
 
         minx = np.clip(np.floor(np.minimum(np.minimum(x0, x1), x2)).astype(int), 0, w - 1)
@@ -215,12 +237,12 @@ def render(
             if not closer.any():
                 continue
 
-            if tex is not None:
+            if tex_img is not None:
                 u = w0 * uv[i, 0, 0] + w1 * uv[i, 1, 0] + w2 * uv[i, 2, 0]
                 vv = w0 * uv[i, 0, 1] + w1 * uv[i, 1, 1] + w2 * uv[i, 2, 1]
-                rgba = _sample(tex, u, vv).astype(np.float64) / 255.0
-                if rgba.ndim == 3 and rgba.shape[-1] == 4:
-                    closer = closer & (rgba[:, :, 3] >= alpha_cutoff)
+                rgba = _sample(tex_img, u, vv).astype(np.float64) / 255.0
+                if tex_cut is not None and rgba.ndim == 3 and rgba.shape[-1] == 4:
+                    closer = closer & (rgba[:, :, 3] >= tex_cut)
                     if not closer.any():
                         continue
                 px = np.clip(rgba[:, :, :3] * lam[i], 0, 1)

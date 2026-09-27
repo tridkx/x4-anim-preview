@@ -131,6 +131,21 @@ vanilla 侧保持纯色——它只是姿态基准，上贴图没意义还慢一
 一个图集常被十几个材质共用（`face` / `eyebrow` / `eyelash` / `teeth` 全指向
 `lumine_face_diff`）。
 
+**裁剪规则照抄游戏 shader**，不是拍脑袋定阈值。mod 的 `libraries/material_library.xml`
+里写着每个材质用哪个 shader、什么 blendmode：
+
+| shader | blendmode | 怎么画 |
+|---|---|---|
+| `p1_hair` | `ALPHA1` / `TWOSIDED` | alpha < **0.5** 丢弃（双面） |
+| `p1_character` | `NONE` | **完全不裁剪**（皮肤、衣服） |
+| `p1_character` | `TWOSIDED` | 不裁剪，双面（裙子、飘带、披风） |
+| `p1_character` | `ALPHA1` | alpha < 0.5 丢弃 |
+
+阈值 0.5 来自 `shadergl/glsl/p1/high/hair.frag.glsl` 里的硬编码
+`if (ColorBaseDiffuse.a < 0.5f) discard;`；而 `p1/high/character.frag.glsl`
+**一个 discard 都没有**。之前对全部材质一律按 0.35 裁剪，把半透明的发丝边缘留了下来，
+头发看起来就是"白棕相间的噪点"——这是整个项目里最费劲的一个 bug。
+
 退出码 `0` = ok、`1` = warn、`2` = fail，可直接接进 CI。
 
 判据（越接近 1 越好）：

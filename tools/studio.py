@@ -86,12 +86,14 @@ class StudioApp:
         self.compare_var = tk.BooleanVar(value=bool(cfg.get("compare", True)))
         self.bones_var = tk.BooleanVar(value=False)
         self.mesh_var = tk.BooleanVar(value=True)
+        self.textures_var = tk.BooleanVar(value=bool(cfg.get("textures", True)))
         self.loop_var = tk.BooleanVar(value=True)
         self.autoplay_var = tk.BooleanVar(value=False)
         self.speed_var = tk.DoubleVar(value=1.0)
         self.time_var = tk.DoubleVar(value=0.0)
 
         self._build_ui()
+        self.sync_state()          # 把 config 里存的开关同步进 ViewState
         self._load_animations()
         self._load_mods()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -135,6 +137,8 @@ class StudioApp:
         self.mod_combo.bind("<<ComboboxSelected>>", lambda e: self.on_mod_change())
         ttk.Button(row, text="浏览…", width=7, command=self.on_browse).pack(side="left", padx=(4, 0))
         ttk.Button(row, text="重扫", width=6, command=self._load_mods).pack(side="left", padx=(4, 0))
+        ttk.Button(row, text="重载", width=6,
+                   command=self._reload_assets).pack(side="left", padx=(4, 0))
 
         row2 = ttk.Frame(box)
         row2.pack(fill="x", pady=(6, 0))
@@ -219,9 +223,11 @@ class StudioApp:
         vrow.pack(fill="x", pady=(6, 0))
         ttk.Checkbutton(vrow, text="网格", variable=self.mesh_var,
                         command=self.sync_state).pack(side="left")
+        ttk.Checkbutton(vrow, text="贴图", variable=self.textures_var,
+                        command=self.sync_state).pack(side="left", padx=(6, 0))
         ttk.Checkbutton(vrow, text="骨骼", variable=self.bones_var,
                         command=self.sync_state).pack(side="left", padx=(6, 0))
-        ttk.Button(vrow, text="重置相机", width=9, command=self.reset_camera).pack(side="left", padx=(8, 0))
+        ttk.Button(vrow, text="重置相机", width=9, command=self.reset_camera).pack(side="left", padx=(6, 0))
         ttk.Button(vrow, text="截图", width=6, command=self.screenshot).pack(side="left", padx=4)
         return box
 
@@ -306,7 +312,13 @@ class StudioApp:
         new_scenes: list[scene_mod.Scene] = []
         try:
             if sources:
-                new_scenes.append(scene_mod.Scene("mod", sources))
+                tex = rules = None
+                if mod_dir is not None:
+                    ts = scene_mod.TextureSet([mod_dir], warn=self._set_status)
+                    tex = ts if len(ts) else None
+                    rules = scene_mod.MaterialRules([mod_dir])
+                new_scenes.append(scene_mod.Scene("mod", sources, textures=tex,
+                                                  material_rules=rules))
             if self.compare_var.get() or not new_scenes:
                 van = self._vanilla_sources()
                 if van:
@@ -330,6 +342,10 @@ class StudioApp:
             self.on_pick_anim(force=True)
 
         desc = " + ".join(f"{s.label}({s.info()})" for s in self.scenes)
+        if self.scenes and self.scenes[0].label == "mod":
+            hit, total = self.scenes[0].texture_stats()
+            if total:
+                desc += f"  贴图 {hit}/{total}"
         hint = mod_dir.name if mod_dir else "仅 vanilla"
         self.asset_hint.configure(text=f"{hint}\n{desc}")
         self._set_status("场景已加载")
@@ -426,6 +442,7 @@ class StudioApp:
         self.state.loop = self.loop_var.get()
         self.state.show_mesh = self.mesh_var.get()
         self.state.show_bones = self.bones_var.get()
+        self.state.show_textures = self.textures_var.get()
         self.state.speed = float(self.speed_var.get())
 
     def reset_camera(self):
@@ -454,6 +471,12 @@ class StudioApp:
 
     def on_mod_change(self):
         self.rebuild()
+
+    def _reload_assets(self):
+        """重新读磁盘上的 .xac / 贴图（改完 mod 不用切来切去）。"""
+        self.anim_cache.clear()
+        self.rebuild()
+        self._set_status("已重新加载资产")
 
     # -- 预览回调 ---------------------------------------------------------
     def _hud_lines(self):
@@ -504,6 +527,7 @@ class StudioApp:
                                 self.cfg.get("preview_geometry", "1000x820"),
             "compare": self.compare_var.get(),
             "component": self.component_var.get(),
+            "textures": self.textures_var.get(),
         })
         if self.preview and not self.preview.closed:
             self.preview.close()
@@ -619,7 +643,7 @@ def main(argv=None):
                         flag = "" if y + hh <= win_h + 2 else "  <== 超出窗口!"
                         overflow = overflow or bool(flag)
                         print(f"[selftest]   {name:9s} y={y:5d} h={hh:5d} 底={y+hh:5d}{flag}")
-                    print(f"[selftest] 布局{'有问题' if overflow else '完整可见 ✓'}")
+                    print("[selftest] 布局" + ("有问题" if overflow else "完整可见 ✓"))
                     try:
                         from PIL import ImageGrab
                         r.lift()
@@ -635,10 +659,10 @@ def main(argv=None):
                         print(f"[selftest] 面板截图 {panel}  {box}")
                     except Exception as exc:
                         print(f"[selftest] 面板截图失败: {exc}")
-                    print(f"[selftest] 场景: " +
-                          " + ".join(f"{s.label}({s.info()})" for s in app.scenes))
-                    print(f"[selftest] 动画: " +
-                          (app.current_ref().name if app.current_ref() else "(无)"))
+                    print("[selftest] 场景: "
+                          + " + ".join(f"{s.label}({s.info()})" for s in app.scenes))
+                    print("[selftest] 动画: "
+                          + (app.current_ref().name if app.current_ref() else "(无)"))
             except Exception as exc:
                 import traceback
                 traceback.print_exc()

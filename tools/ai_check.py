@@ -36,8 +36,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import console  # noqa: F401  (设置 UTF-8 控制台)
@@ -172,27 +170,25 @@ def main(argv=None) -> int:
     if not mod_sources:
         print(f"{mod_dir} 下没找到 .xac")
         return 2
-    print(f"mod 资产: " + ", ".join(f"{k}={v[0]}" for k, v in mod_sources.items()))
-
-    mod_scene = scene_mod.Scene("mod", list(mod_sources.values()))
+    print("mod 资产: " + ", ".join(f"{k}={v[0]}" for k, v in mod_sources.items()))
 
     # 贴图只给 mod 侧（vanilla 只是姿态基准，上贴图没意义还慢一倍）
-    texsets = None
-    part_tex: list | None = None
+    texset = None
+    rules = scene_mod.MaterialRules([mod_dir])
     if not args.no_textures:
-        texsets = [scene_mod.TextureSet([mod_dir], warn=print) for _ in mod_scene.assets]
-        part_tex = []
-        for asset, ts in zip(mod_scene.assets, texsets):
-            mapping = ts.for_asset(asset)
-            for mesh in asset.meshes:
-                if mesh.vertex_count == 0:
-                    continue
-                part_tex.append(mapping)
-        hit = sum(1 for m in part_tex if m)
-        print(f"贴图: {len(texsets[0]) if texsets else 0} 张可用，"
-              f"{hit}/{len(part_tex)} 个网格有贴图")
-    mod_assets = {slot: mod_scene.assets[i] for i, slot in enumerate(mod_sources)
-                  if i < len(mod_scene.assets)}
+        ts = scene_mod.TextureSet([mod_dir], warn=print)
+        texset = ts if len(ts) else None
+    mod_scene = scene_mod.Scene("mod", list(mod_sources.values()), textures=texset,
+                                material_rules=rules)
+    if texset is not None:
+        hit, total = mod_scene.texture_stats()
+        print(f"贴图: {len(texset)} 张可用，{hit}/{total} 个网格有贴图")
+    # 用"实际加载成功的那几个"配对槽位：Scene 会跳过没有网格的资产，
+    # 直接按 mod_sources 的下标去索引 assets 会错位
+    kept = {name for name, _ in mod_scene.kept_sources}
+    mod_assets = {slot: asset for slot, (name, _raw), asset
+                  in zip(mod_sources, mod_scene.kept_sources, mod_scene.assets)
+                  if name in kept}
     van_sources = []
     for ref in (scene_mod.DEFAULT_HEAD, scene_mod.DEFAULT_BODY):
         got = scene_mod.resolve_asset(ref, game)
@@ -275,7 +271,7 @@ def main(argv=None) -> int:
                 # 两边地板不在同一高度，"谁陷进地板"就看不出来了
                 img = soft.render(
                     s.pose(t), cam, floor_y=0.0,
-                    textures=part_tex if s is mod_scene else None,
+                    textures=None if args.no_textures else s.part_textures(),
                     bones=None if args.no_bones else s.bone_segments(t),
                 )
                 cells.append(soft.add_label(img, f"{s.label} | t={t:.2f}s"))

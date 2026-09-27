@@ -13,7 +13,6 @@ from __future__ import annotations
 import glob
 import json
 import os
-import struct
 from pathlib import Path
 
 # 项目根 = 本文件所在目录的上一级（tools/ 的父目录）

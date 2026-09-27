@@ -161,6 +161,8 @@ def pose_metrics(scene, t: float) -> dict:
 
     for rig, mesh_list in ((r, r.asset.meshes) for r in scene.rigs):
         world = rig.world_matrices(t)
+        # 蒙皮矩阵从 world 直接推，别对每个 mesh 重算一遍 FK
+        mats = world @ rig.bind_world_inv
         index = {}
         for i, nid in enumerate(rig.bone_ids):
             index[norm(rig.asset.nodes[nid].name)] = i
@@ -170,7 +172,6 @@ def pose_metrics(scene, t: float) -> dict:
         for mesh in mesh_list:
             if mesh.vertex_count == 0:
                 continue
-            mats = rig.skin_matrices(t)
             pos = rig.skin_positions(mesh, mats)
             val = joint_tear(rig, mesh, pos, world)
             if np.isfinite(val):

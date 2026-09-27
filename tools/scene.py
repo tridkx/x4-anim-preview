@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 import numpy as np
@@ -126,6 +126,95 @@ def discover_mod_dirs(game: x4game.GameArchive | None = None,
 
 
 # ---------------------------------------------------------------------------
+# 材质规则（复刻游戏的渲染方式）
+# ---------------------------------------------------------------------------
+
+#: 默认的 alpha 裁剪阈值。取自游戏 shader 的硬编码值：
+#: ``shadergl/glsl/p1/high/hair.frag.glsl`` 里写着 ``if (ColorBaseDiffuse.a < 0.5f) discard;``
+ALPHA_TEST_DEFAULT = 0.5
+
+#: 需要 alpha 裁剪的 shader。``p1_character`` 的 frag shader 里**没有任何 discard**，
+#: 所以皮肤/衣服这类材质不该裁剪——之前对全部材质一律裁剪是错的。
+ALPHA_TEST_SHADERS = {"p1_hair", "p1_hair_paint"}
+
+#: 这些 blendmode 走 1-bit alpha（引擎侧设 alpha test），阈值沿用 0.5
+ALPHA_TEST_BLENDMODES = {"ALPHA1", "ALPHA1NOG", "ALPHA8", "ALPHA8_SINGLE", "PREALPHA8",
+                         "ALPHA8_ANARK", "ALPHA8_OVERLAY", "ALPHA8_GBLEND"}
+
+
+@dataclass(frozen=True)
+class MaterialRule:
+    """一个材质该怎么画。"""
+
+    shader: str = ""
+    blendmode: str = "NONE"
+
+    @property
+    def two_sided(self) -> bool:
+        return self.blendmode in ("TWOSIDED", "HAIR") or self.shader in ALPHA_TEST_SHADERS
+
+    @property
+    def alpha_test(self) -> float | None:
+        """返回裁剪阈值；``None`` 表示不做 alpha 裁剪（不透明材质）。"""
+        if self.shader in ALPHA_TEST_SHADERS:
+            return ALPHA_TEST_DEFAULT
+        if self.blendmode in ALPHA_TEST_BLENDMODES:
+            return ALPHA_TEST_DEFAULT
+        return None
+
+
+class MaterialRules:
+    """从 mod 的 ``libraries/material_library.xml`` 读每个材质怎么渲染。
+
+    实测同一套资产里既有 ``p1_hair``（alpha<0.5 裁剪）也有 ``p1_character``
+    （完全不裁剪），还有大量 ``TWOSIDED``。一律按同一个阈值裁剪，
+    半透明的发丝边缘会被留下来，看起来就是"白棕相间"的噪点。
+    """
+
+    def __init__(self, roots: list[Path]):
+        self.rules: dict[str, MaterialRule] = {}
+        for root in roots:
+            root = Path(root)
+            if not root.is_dir():
+                continue
+            for f in sorted(root.rglob("material_library.xml")):
+                self._parse(f)
+
+    def _parse(self, path: Path):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        import re
+        for m in re.finditer(r'<material\s+name="([^"]+)"([^>]*)>', text):
+            name, attrs = m.group(1), m.group(2)
+            sh = re.search(r'shader="([^"]+)"', attrs)
+            bm = re.search(r'blendmode="([^"]+)"', attrs)
+            self.rules[name.lower()] = MaterialRule(
+                shader=sh.group(1) if sh else "", blendmode=bm.group(1) if bm else "NONE")
+
+    def __len__(self):
+        return len(self.rules)
+
+    def get(self, material: str) -> MaterialRule:
+        """材质名可能是 ``boru.hair``，而 xml 里写的是 ``hair``。"""
+        key = material.strip().lower()
+        rule = self.rules.get(key)
+        if rule is None and "." in key:
+            rule = self.rules.get(key.rsplit(".", 1)[-1])
+        return rule or MaterialRule()
+
+
+@dataclass
+class SurfaceTex:
+    """一个材质最终要怎么画：贴图 + 裁剪规则。"""
+
+    image: "object" = None
+    alpha_test: float | None = None
+    two_sided: bool = False
+
+
+# ---------------------------------------------------------------------------
 # 贴图
 # ---------------------------------------------------------------------------
 
@@ -242,19 +331,26 @@ class TextureSet:
 class Scene:
     """一组资产 + 一条动画，按时间给出蒙皮后的顶点。"""
 
-    def __init__(self, label: str, sources: list[tuple[str, bytes]], delta: bool = False):
+    def __init__(self, label: str, sources: list[tuple[str, bytes]], delta: bool = False,
+                 textures: "TextureSet | None" = None,
+                 material_rules: "MaterialRules | None" = None):
         self.label = label
         self.paths: list[str] = []
         self.assets: list[xac.Asset] = []
         self.rigs: list[rig_mod.Rig] = []
         self.delta = delta
+        self.texture_set = textures
+        self.material_rules = material_rules
+        self._part_tex: list | None = None
         self.anim: xsm.Xsm | None = None
         self.anim_name = "-"
+        self.kept_sources: list[tuple[str, bytes]] = []
         for name, raw in sources:
             asset = xac.load_xac(name, raw)
             if not asset.meshes:
                 continue
             self.paths.append(name)
+            self.kept_sources.append((name, raw))
             self.assets.append(asset)
             self.rigs.append(rig_mod.Rig.build(asset, None, delta=delta))
         if not self.assets:
@@ -313,6 +409,40 @@ class Scene:
                     continue
                 segs.append((world[i][:3, 3], world[p][:3, 3]))
         return segs
+
+    def part_textures(self) -> list | None:
+        """与 :meth:`pose` 返回的 parts **一一对应**的贴图表。
+
+        每个 part 一张表（``{material_id: RGBA}``），因为 head 和 torso 是两套独立
+        的材质表，共用一个 dict 会互相查不到——这正是之前"衣服没贴图"的成因。
+        没有贴图时返回 ``None``。
+        """
+        if self.texture_set is None or not len(self.texture_set):
+            return None
+        if self._part_tex is None:
+            out = []
+            for asset in self.assets:
+                mapping = self.texture_set.for_asset(asset)
+                rules = self.material_rules
+                surfaces = {}
+                for mid, img in mapping.items():
+                    name = asset.materials[mid] if mid < len(asset.materials) else ""
+                    rule = rules.get(name) if rules is not None else MaterialRule()
+                    surfaces[mid] = SurfaceTex(image=img, alpha_test=rule.alpha_test,
+                                               two_sided=rule.two_sided)
+                for mesh in asset.meshes:
+                    if mesh.vertex_count == 0:
+                        continue
+                    out.append(surfaces)
+            self._part_tex = out
+        return self._part_tex
+
+    def texture_stats(self) -> tuple[int, int]:
+        """``(有贴图的 part 数, 总 part 数)``。"""
+        tex = self.part_textures()
+        if tex is None:
+            return 0, 0
+        return sum(1 for m in tex if m), len(tex)
 
     def info(self) -> str:
         return (f"{len(self.assets)} 个网格 / {self.vertex_count} 顶点 / "
