@@ -103,14 +103,55 @@ python tools/skeleton_check.py --mod /path/to/your/mod
 输出每根骨的 bind 位置 / 旋转 / 缩放偏差与父节点差异，并给出结论。判据是
 **按骨名配对**而不是按出现顺序——原版资产里同一套骨经常重复多次，按顺序比会误报。
 
-## 4. 资产与动画从哪来
+## 4. 给 AI / CI 用：一条命令出报告
+
+GUI 是给人看的，AI 看不见窗口；只丢一张图，AI 还得自己猜哪里有问题。
+`ai_check.py` 把"这版 mod 的动作对不对"翻译成**可以比较的数字**（全部相对
+vanilla 基线），再附上对比图：
+
+```bash
+python tools/ai_check.py --mod <mod目录> --out report/
+```
+
+产物：
+
+| 文件 | 内容 |
+|---|---|
+| `report/report.json` | 全部指标、mod/vanilla 比值、告警、结论（AI 读这个） |
+| `report/summary.txt` | 同样内容的人类可读版 |
+| `report/shots/<动画>.png` | 每个动画一张，从左到右是 `mod(t0) vanilla(t0) mod(t1) vanilla(t1)…` |
+
+退出码 `0` = ok、`1` = warn、`2` = fail，可直接接进 CI。
+
+判据（越接近 1 越好）：
+
+| 指标 | 阈值 | 含义 |
+|---|---|---|
+| `joint_tear_cm` | > 1.35× | 顶点到主导骨的距离偏大，蒙皮可疑 |
+| `feet_gap_cm` | < 0.85× | 两脚间距被收窄 = 猫步（**几何**间距，不是骨间距） |
+| `ground_gap_min_cm` | 与 vanilla 差 > 3 cm | 脚悬空或陷进地板 |
+| `flipped_face_ratio` | > 0.1 | 绕序翻转，实机透明/看到内壳 |
+| 顶点数 | > 15× | 实测会让空间站频闪 |
+| `matched` | < 0.5 | 动画节点对不上骨架，动画驱动不了 |
+
+两个容易踩的坑，已经在实现里绕开了：
+
+- **两脚间距必须用几何顶点算**。用骨位置算的话，因为 mod 与 vanilla 骨架逐字节相同，
+  两边会得出**完全一样**的假结论——而猫步本来就是"关节落在几何内侧"的几何问题。
+- **绕序别用"面法线背离质心"那套**。实测同一个 mod 躯干 0.63、头部 0.76，vanilla 反而
+  0.76、0.61，完全不可比，会把正常资产判成绕序翻转。改用带符号的
+  `dot(面法线, 顶点法线)` 为负的比例，两边都是 0.000，干净。
+
+工作区根还有一份 `AGENTS.md`，写明让 AI 改完 mod 后先跑这个自查再进游戏。
+
+## 5. 资产与动画从哪来
 
 - 网格：`--mod` 目录下的 `.xac`（按文件名含 `head` / `body` 分槽位），也可以给游戏包内路径。
 - 动画：默认取 macro 实际引用的 component（`character_argon_female_01`）。
   Argon / Terran 等人类种族共用这套骨架和动画，所以 Terran 的 mod 也用它。
   `python tools/animations.py <component名>` 可以列出任意 component 的动画清单。
 
-## 5. `.xsm` 格式（逆向结果）
+## 6. `.xsm` 格式（逆向结果）
 
 ```
 "XSM " + u32 版本 + 头部字段 + 导出器/源文件/日期三个字符串
@@ -146,7 +187,7 @@ python tools/skeleton_check.py --mod /path/to/your/mod
 > 顺带记录一个 `.xac` 的坑：**材质 chunk 的 length 不包含 layer 数据**
 > （实测 `length=129` 的 chunk 实际占 191 字节），照着 length 跳会立刻错位。
 
-## 6. 参数速查
+## 7. 参数速查
 
 ```
 --mod DIR              mod 目录（自动挑 head/torso 的 .xac）
@@ -164,15 +205,17 @@ python tools/skeleton_check.py --mod /path/to/your/mod
 网格资产的版本差。实测**不该当默认**：同一动画在不同资产上会给出不同姿态。
 默认是直接套用动画值。
 
-## 7. 已知限制
+## 8. 已知限制
 
 - 只做**姿态**：不做贴图、材质通道、透明/双面，也不做法线贴图；检查外观请回游戏。
+- `ai_check.py` 的指标是**筛子不是判决**：长裙、大袖、披风这类远离骨骼的服装几何，
+  关节撕裂天然偏高，报警后要对着 `shots/` 的图确认再下结论。
 - 只播**骨骼动画**：morph / 表情（viseme、blendshape）还没做，脸部细节看不到。
 - props 槽位（头发、胡子等）可以当普通资产用 `--body/--head` 传，但没有自动配对。
 - 老格式动画（`root/spine1` 命名）不能驱动现役骨架，播放时会提示匹配率。
 - 软光栅出图是 CPU 实现，一张 400×660 约 0.25 s；实时窗口走 OpenGL，不吃这个开销。
 
-## 8. 目录
+## 9. 目录
 
 ```
 run_studio.bat      双击启动图形界面（CRLF 行尾，别改成 LF）
@@ -188,6 +231,8 @@ tools/
   xsm.py            .xsm 解析（关键帧曲线）
   rig.py            正向运动学 + 线性混合蒙皮
   animations.py     component -> 动画清单
+  ai_check.py       给 AI/CI 的成果检查：一条命令出 JSON 判据 + 对比图
+  metrics.py        量化判据（关节撕裂 / 两脚间距 / 离地 / 绕序 / 法线）
   skeleton_check.py 骨架一致性校验
   render.py         纯 numpy 软光栅（离线出图用）
 examples/

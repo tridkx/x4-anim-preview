@@ -59,7 +59,10 @@ def compare(reference: xac.Asset, target: xac.Asset, label: str) -> dict:
 
     if not tgt:
         print(f"  [{label}] 没有任何同名骨骼 —— 骨架完全对不上")
-        return {"ok": False, "coverage": 0.0}
+        return {"ok": False, "slot": label, "shared_bones": 0,
+                "reference_bones": len(ref_by_name), "missing_bones": sorted(ref_by_name)[:20],
+                "missing_count": len(ref_by_name), "max_pos_diff_cm": None,
+                "max_rot_diff_deg": None, "parent_mismatch": None}
 
     pos = np.array([np.linalg.norm(np.asarray(n.position) - np.asarray(ref_by_name[n.name].position))
                     for n in tgt])
@@ -81,7 +84,21 @@ def compare(reference: xac.Asset, target: xac.Asset, label: str) -> dict:
           + (f"  <- {tgt[j].name}" if rot.max() > 0.01 else ""))
     print(f"    bind 缩放最大偏差 {scl.max():.5f}     父节点不一致 {parents} 根")
     print(f"    结论: {'一致 ✓' if ok else '不一致 ✗ —— 动画/挂点可能与实机不符'}")
-    return {"ok": ok, "coverage": len(tgt) / max(len(ref_by_name), 1)}
+    return {
+        "ok": ok,
+        "slot": label,
+        "shared_bones": len(tgt),
+        "reference_bones": len(ref_by_name),
+        "missing_bones": missing[:20],
+        "missing_count": len(missing),
+        "max_pos_diff_cm": round(float(pos.max()), 6),
+        "mean_pos_diff_cm": round(float(pos.mean()), 6),
+        "max_rot_diff_deg": round(float(rot.max()), 6),
+        "max_scale_diff": round(float(scl.max()), 6),
+        "parent_mismatch": int(parents),
+        "worst_pos_bone": tgt[i].name if pos.max() > 1e-4 else None,
+        "worst_rot_bone": tgt[j].name if rot.max() > 0.01 else None,
+    }
 
 
 def main(argv=None):
