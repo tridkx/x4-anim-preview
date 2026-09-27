@@ -11,8 +11,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 import numpy as np
-from PIL import Image
-
 import x4game, xac, xsm, rig, render
 
 OUT = Path(__file__).resolve().parent.parent / "work" / "verify"
@@ -50,7 +48,6 @@ cam = render.Camera(target=center, distance=340, azimuth=0, elevation=6, width=3
 images = []
 
 # 1) 纯绑定姿态（不套动画）
-import copy
 static = rig.Rig.build(asset, None)
 for label, rr, t in [("bind", static, 0.0), ("f0", r, 0.0), ("t=1s", r, 1.0),
                      ("t=2s", r, 2.0), ("t=3s", r, 3.0), ("t=4s", r, 4.0)]:

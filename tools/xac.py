@@ -227,7 +227,7 @@ def _read_mesh(r: _Reader, mesh_id: int) -> Mesh:
     node_id = r.i32()
     range_count = r.i32()
     vertex_count = r.i32()
-    index_count = r.i32()
+    r.i32()  # index_count：可由 submesh 推出，不单独保存
     submesh_count = r.i32()
     attribute_count = r.i32()
     collision = r.byte()
@@ -292,7 +292,7 @@ def _read_mesh(r: _Reader, mesh_id: int) -> Mesh:
 
 def _read_skin(r: _Reader, meshes: list[Mesh]):
     node_id = r.i32()
-    local_bone_count = r.i32()
+    r.i32()  # local_bone_count：本资产用不到（权重表已经摊平）
     influence_count = r.i32()
     collision = r.byte()
     r.read(3)
