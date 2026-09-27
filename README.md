@@ -122,7 +122,8 @@ python tools/ai_check.py --mod <mod目录> --out report/
 |---|---|
 | `report/report.json` | 全部指标、mod/vanilla 比值、告警、结论（AI 读这个） |
 | `report/summary.txt` | 同样内容的人类可读版 |
-| `report/shots/<动画>.png` | 每个动画一张，从左到右是 `mod(t0) vanilla(t0) mod(t1) vanilla(t1)…` |
+| `report/shots/<动画>.png` | 时间序列：`mod(t0) vanilla(t0) mod(t1) vanilla(t1)…` |
+| `report/shots/<动画>_views.png` | 环绕视角：同一时刻绕一圈（默认 4 个角度） |
 
 **图里有什么**：mod 侧带 **albedo 贴图**（能看到颜色错位、纯黑、透明这类外观问题），
 两侧都叠**绿色骨骼线**（穿透显示，可直接核对骨架与几何是否对得上）。
@@ -155,6 +156,17 @@ vanilla 侧保持纯色——它只是姿态基准，上贴图没意义还慢一
 
 **这是整个项目里最费劲的一个 bug**——我一开始靠试阈值（0.02 / 0.1 / 0.2 / 0.35 全试过），
 其实该做的是去读游戏 shader 的源码。教训：**能查证就别猜**。
+
+**视角可调**——单角度会漏掉背面、侧面、腋下、裙摆内侧：
+
+```bash
+python tools/ai_check.py --mod <目录> --out report/ \
+    --views 8            # 环绕 8 个角度（0 = 关闭）
+    --azimuth 200        # 时间序列那张的方位角
+    --elevation -20      # 仰角，负值从下往上看（查腋下/裙摆）
+```
+
+命令行出图同样支持：`viewer.py --shot out.png --views 6 --elevation -15`。
 
 退出码 `0` = ok、`1` = warn、`2` = fail，可直接接进 CI。
 
@@ -232,7 +244,9 @@ vanilla 侧保持纯色——它只是姿态基准，上贴图没意义还慢一
 --component NAME       取哪套动画（默认 character_argon_female_01）
 --anim NAME            只播某条动画（逻辑名或资产名）
 --delta                实验性增量姿态模式，见下
---shot OUT.png         不开窗口，直接出图；配合 --frames/-–anims/--azimuth
+--shot OUT.png         不开窗口，直接出图；配合 --frames/--anims
+--views N              环绕 N 个角度出图（0 = 只用 --azimuth）
+--azimuth / --elevation  视角角度；elevation 为负是从下往上看
 --width/--height       窗口或出图尺寸
 ```
 

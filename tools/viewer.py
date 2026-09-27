@@ -188,22 +188,35 @@ def run_shots(scenes, anim_list, game, out: str, frames: list[float], args) -> i
         for s in scenes:
             s.set_anim(anim, ref.name)
         for s in scenes:
-            cam = soft.Camera(
-                target=s.center, distance=max(s.height, 60.0) * 2.0,
-                azimuth=args.azimuth, elevation=6.0,
-                width=max(args.width // max(len(scenes), 1), 64), height=args.height,
-            )
+            w = max(args.width, 64)      # --width 是**每格**宽度，不是整张图的总宽
             tex = None if args.no_textures else s.part_textures()
-            for t in frames:
-                t = min(t, max(anim.duration - 1e-3, 0.0))
-                img = soft.render(
-                    s.pose(t), cam, floor_y=0.0, textures=tex,
-                    bones=None if args.no_bones else s.bone_segments(t),
+            angles = ([args.azimuth] if args.views <= 0
+                      else [360.0 * k / args.views for k in range(args.views)])
+            for az in angles:
+                cam = soft.Camera(
+                    target=s.center, distance=max(s.height, 60.0) * 2.0,
+                    azimuth=az, elevation=args.elevation, width=w, height=args.height,
                 )
-                images.append(soft.add_label(img, f"{s.label} | {ref.name} | t={t:.2f}s"))
+                ts = frames if args.views <= 0 else [max(anim.duration, 1e-6) * 0.5]
+                for t in ts:
+                    t = min(t, max(anim.duration - 1e-3, 0.0))
+                    img = soft.render(
+                        s.pose(t), cam, floor_y=0.0, textures=tex,
+                        bones=None if args.no_bones else s.bone_segments(t),
+                    )
+                    tag = f"{s.label} | {ref.name} | t={t:.2f}s"
+                    if args.views > 0:
+                        tag += f" | az={az:.0f}°"
+                    images.append(soft.add_label(img, tag))
     if not images:
         raise SystemExit("没有渲染出任何图片")
-    sheet = soft.contact_sheet(images, columns=min(len(frames) * len(scenes), 8))
+    # 一行排开最清楚；格数太多时才折行，且尽量折成整齐的矩形
+    n = len(images)
+    if n <= 12:
+        cols = n
+    else:
+        cols = 6 if n % 6 == 0 else 8
+    sheet = soft.contact_sheet(images, columns=cols)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     sheet.save(out)
     print(f"写出 {out}  {sheet.size}")
@@ -229,7 +242,12 @@ def main(argv=None) -> int:
     ap.add_argument("--window-shot", help="开窗口跑约 2 秒后截图再退出（验证 OpenGL 路径）")
     ap.add_argument("--frames", default="0,15,30,45", help="出图模式的帧号（15fps 计）")
     ap.add_argument("--azimuth", type=float, default=200.0)
-    ap.add_argument("--width", type=int, default=1100)
+    ap.add_argument("--elevation", type=float, default=6.0,
+                    help="仰角（度）。负值从下往上看，查腋下/裙摆内侧时有用")
+    ap.add_argument("--views", type=int, default=0,
+                    help="环绕 N 个角度出图（0 = 只用 --azimuth 一个角度）")
+    ap.add_argument("--width", type=int, default=1100,
+                    help="窗口宽度；出图模式下是**每格**宽度")
     ap.add_argument("--height", type=int, default=760)
     ap.add_argument("--start", type=int, default=0, help="从第几条动画开始")
     ap.add_argument("--no-textures", action="store_true",

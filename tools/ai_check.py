@@ -152,6 +152,13 @@ def main(argv=None) -> int:
     ap.add_argument("--no-bones", action="store_true", help="不叠加绿色骨骼线")
     ap.add_argument("--width", type=int, default=330)
     ap.add_argument("--height", type=int, default=540)
+    ap.add_argument("--azimuth", type=float, default=200.0,
+                    help="时间序列那张图用的方位角（度）")
+    ap.add_argument("--elevation", type=float, default=6.0,
+                    help="仰角（度）。负值从下往上看，查腋下/裙摆内侧时有用")
+    ap.add_argument("--views", type=int, default=4,
+                    help="额外输出一张环绕图，绕 N 个等分角度（0 = 关闭）。"
+                         "单角度会漏掉背面、侧面、腋下这类问题")
     args = ap.parse_args(argv)
 
     t_start = time.time()
@@ -261,19 +268,26 @@ def main(argv=None) -> int:
         # -- 出图 ---------------------------------------------------------
         dur = max(anim.duration, 1e-6)
         times = [dur * (i + 0.5) / max(args.shots, 1) for i in range(args.shots)]
-        cells = []
-        for t in times:
+
+        def shoot(t, azimuth, elevation):
+            out = []
             for s in (mod_scene, van_scene):
                 cam = soft.Camera(target=s.center, distance=max(s.height, 60.0) * 2.0,
-                                  azimuth=200.0, elevation=6.0,
+                                  azimuth=azimuth, elevation=elevation,
                                   width=args.width, height=args.height)
                 # 地板固定在世界 Y=0（和指标口径一致）：用各场景自己的最低点会让
                 # 两边地板不在同一高度，"谁陷进地板"就看不出来了
-                img = soft.render(
+                out.append(soft.render(
                     s.pose(t), cam, floor_y=0.0,
                     textures=None if args.no_textures else s.part_textures(),
                     bones=None if args.no_bones else s.bone_segments(t),
-                )
+                ))
+            return out
+
+        cells = []
+        for t in times:
+            imgs = shoot(t, args.azimuth, args.elevation)
+            for s, img in zip((mod_scene, van_scene), imgs):
                 cells.append(soft.add_label(img, f"{s.label} | t={t:.2f}s"))
         # 交错排列：mod0 vanilla0 mod1 vanilla1 ...
         sheet = soft.contact_sheet(cells, columns=len(cells))
@@ -282,9 +296,30 @@ def main(argv=None) -> int:
         shot_index.append({
             "file": f"shots/{ref.name}.png",
             "animation": ref.name,
+            "view": f"azimuth={args.azimuth:g} elevation={args.elevation:g}",
             "layout": "从左到右依次为 mod(t0) vanilla(t0) mod(t1) vanilla(t1) ...",
             "frames_s": [round(t, 3) for t in times],
         })
+
+        if args.views > 0:
+            # 环绕一圈，同一时刻。单看一个角度很容易漏掉背面/侧面的问题
+            t_mid = dur * 0.5
+            ring = []
+            angles = [360.0 * k / args.views for k in range(args.views)]
+            for az in angles:
+                for s, img in zip((mod_scene, van_scene),
+                                  shoot(t_mid, az, args.elevation)):
+                    ring.append(soft.add_label(img, f"{s.label} | az={az:.0f}°"))
+            ring_path = shots_dir / f"{ref.name}_views.png"
+            soft.contact_sheet(ring, columns=len(ring)).save(ring_path)
+            shot_index.append({
+                "file": f"shots/{ref.name}_views.png",
+                "animation": ref.name,
+                "view": f"环绕 {args.views} 个角度，elevation={args.elevation:g}",
+                "layout": "每个角度两张：先 mod 后 vanilla，角度依次为 "
+                          + ", ".join(f"{a:.0f}°" for a in angles),
+                "frames_s": [round(t_mid, 3)],
+            })
 
     report["animations"] = anim_reports
     report["shots"] = shot_index
