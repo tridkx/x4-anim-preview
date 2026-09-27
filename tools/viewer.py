@@ -158,9 +158,28 @@ def run_window(scenes, anim_list, game, args) -> int:
     return 0
 
 
+def _mod_textures(scene, mod_dir: Path | None):
+    """给 mod 场景准备「与 pose() 的 parts 一一对应」的贴图表。"""
+    if mod_dir is None or not mod_dir.is_dir():
+        return None
+    ts = scene_mod.TextureSet([mod_dir])
+    if not len(ts):
+        return None
+    out = []
+    for asset in scene.assets:
+        mapping = ts.for_asset(asset)
+        for mesh in asset.meshes:
+            if mesh.vertex_count == 0:
+                continue
+            out.append(mapping)
+    return out
+
+
 def run_shots(scenes, anim_list, game, out: str, frames: list[float], args) -> int:
     import render as soft
 
+    mod_dir = Path(args.mod) if args.mod else None
+    tex_cache: dict[int, list | None] = {}
     images = []
     for ai in (args.anims or [0]):
         ref = anim_list[ai % len(anim_list)]
@@ -176,9 +195,16 @@ def run_shots(scenes, anim_list, game, out: str, frames: list[float], args) -> i
                 azimuth=args.azimuth, elevation=6.0,
                 width=max(args.width // max(len(scenes), 1), 64), height=args.height,
             )
+            if id(s) not in tex_cache:
+                tex_cache[id(s)] = (_mod_textures(s, mod_dir)
+                                    if s.label == "mod" and not args.no_textures else None)
+            tex = tex_cache[id(s)]
             for t in frames:
                 t = min(t, max(anim.duration - 1e-3, 0.0))
-                img = soft.render(s.pose(t), cam, floor_y=float(s.lo[1]))
+                img = soft.render(
+                    s.pose(t), cam, floor_y=0.0, textures=tex,
+                    bones=None if args.no_bones else s.bone_segments(t),
+                )
                 images.append(soft.add_label(img, f"{s.label} | {ref.name} | t={t:.2f}s"))
     if not images:
         raise SystemExit("没有渲染出任何图片")
@@ -210,6 +236,9 @@ def main(argv=None) -> int:
     ap.add_argument("--width", type=int, default=1100)
     ap.add_argument("--height", type=int, default=760)
     ap.add_argument("--start", type=int, default=0, help="从第几条动画开始")
+    ap.add_argument("--no-textures", action="store_true",
+                    help="出图时不给 mod 侧上贴图（默认上，仅当 --mod 是磁盘目录）")
+    ap.add_argument("--no-bones", action="store_true", help="出图时不叠加绿色骨骼线")
     args = ap.parse_args(argv)
 
     game = x4game.GameArchive()

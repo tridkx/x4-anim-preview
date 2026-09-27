@@ -149,6 +149,9 @@ def main(argv=None) -> int:
     ap.add_argument("--samples", type=int, default=6, help="每条动画采样多少帧")
     ap.add_argument("--shots", type=int, default=3, help="每条动画出几格对比图")
     ap.add_argument("--component", default="character_argon_female_01")
+    ap.add_argument("--no-textures", action="store_true",
+                    help="不给 mod 侧上贴图（默认上；vanilla 侧始终是纯色）")
+    ap.add_argument("--no-bones", action="store_true", help="不叠加绿色骨骼线")
     ap.add_argument("--width", type=int, default=330)
     ap.add_argument("--height", type=int, default=540)
     args = ap.parse_args(argv)
@@ -172,6 +175,22 @@ def main(argv=None) -> int:
     print(f"mod 资产: " + ", ".join(f"{k}={v[0]}" for k, v in mod_sources.items()))
 
     mod_scene = scene_mod.Scene("mod", list(mod_sources.values()))
+
+    # 贴图只给 mod 侧（vanilla 只是姿态基准，上贴图没意义还慢一倍）
+    texsets = None
+    part_tex: list | None = None
+    if not args.no_textures:
+        texsets = [scene_mod.TextureSet([mod_dir], warn=print) for _ in mod_scene.assets]
+        part_tex = []
+        for asset, ts in zip(mod_scene.assets, texsets):
+            mapping = ts.for_asset(asset)
+            for mesh in asset.meshes:
+                if mesh.vertex_count == 0:
+                    continue
+                part_tex.append(mapping)
+        hit = sum(1 for m in part_tex if m)
+        print(f"贴图: {len(texsets[0]) if texsets else 0} 张可用，"
+              f"{hit}/{len(part_tex)} 个网格有贴图")
     mod_assets = {slot: mod_scene.assets[i] for i, slot in enumerate(mod_sources)
                   if i < len(mod_scene.assets)}
     van_sources = []
@@ -254,7 +273,11 @@ def main(argv=None) -> int:
                                   width=args.width, height=args.height)
                 # 地板固定在世界 Y=0（和指标口径一致）：用各场景自己的最低点会让
                 # 两边地板不在同一高度，"谁陷进地板"就看不出来了
-                img = soft.render(s.pose(t), cam, floor_y=0.0)
+                img = soft.render(
+                    s.pose(t), cam, floor_y=0.0,
+                    textures=part_tex if s is mod_scene else None,
+                    bones=None if args.no_bones else s.bone_segments(t),
+                )
                 cells.append(soft.add_label(img, f"{s.label} | t={t:.2f}s"))
         # 交错排列：mod0 vanilla0 mod1 vanilla1 ...
         sheet = soft.contact_sheet(cells, columns=len(cells))

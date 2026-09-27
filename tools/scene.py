@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+import ddstex
 import rig as rig_mod
 import x4game
 import xac
@@ -122,6 +123,115 @@ def discover_mod_dirs(game: x4game.GameArchive | None = None,
                     add(cand, f"[{sub.name}] {rel}")
 
     return [(label, path) for path, label in sorted(found.items(), key=lambda kv: kv[1])]
+
+
+# ---------------------------------------------------------------------------
+# 贴图
+# ---------------------------------------------------------------------------
+
+
+class TextureSet:
+    """mod 目录里的贴图：``材质名 -> (H,W,4) uint8``。
+
+    实测的命名约定是「材质名点换下划线 + 用途后缀」：
+
+        material ``lumine.cloth``  ->  ``textures/lumine_cloth_diff.gz``
+
+    只加载 diffuse（albedo）。normal / smooth 对"动作对不对"没有帮助，
+    而且 vanilla 侧本来就不上贴图（它只是姿态基准）。
+    """
+
+    SUFFIXES = ("_diff", "_albedo", "_col", "_basecolor")
+
+    def __init__(self, roots: list[Path], warn=None):
+        self.files: dict[str, Path] = {}
+        self.cache: dict[str, np.ndarray | None] = {}
+        self.warn = warn
+        for root in roots:
+            root = Path(root)
+            if not root.is_dir():
+                continue
+            for f in sorted(root.rglob("*")):
+                if not f.is_file():
+                    continue
+                # X4 的贴图是 "xxx_diff.gz"（不带 .dds 后缀），裸 dds 也一并支持
+                name = f.name.lower()
+                if name.endswith(".dds.gz"):
+                    stem = name[:-7]
+                elif name.endswith(".dds"):
+                    stem = name[:-4]
+                elif name.endswith(".gz"):
+                    stem = name[:-3]
+                else:
+                    continue
+                for suf in self.SUFFIXES:
+                    if stem.endswith(suf):
+                        # 两个键都建：layer 里给的是完整名（lumine_face_diff），
+                        # 而按材质名猜时要的是去后缀的名字（lumine_face）
+                        self.files.setdefault(stem, f)
+                        self.files.setdefault(stem[: -len(suf)], f)
+                        break
+                else:
+                    self.files.setdefault(stem, f)
+
+    def __len__(self):
+        return len(self.files)
+
+    @staticmethod
+    def _key(material: str) -> str:
+        return material.strip().lower().replace(".", "_")
+
+    def get(self, material: str):
+        key = self._key(material)
+        if key in self.cache:
+            return self.cache[key]
+        path = self.files.get(key)
+        if path is None:                      # 退化：材质名本身就是贴图名
+            path = self.files.get(key.rsplit("_", 1)[0])
+        img = None
+        if path is not None:
+            try:
+                img = ddstex.load_texture(path)
+            except Exception as exc:
+                if self.warn:
+                    self.warn(f"贴图 {path.name} 解码失败: {exc}")
+        self.cache[key] = img
+        return img
+
+    def by_layer(self, layer: str):
+        """按 xac 材质 layer 里记的贴图名精确取图（优先路径）。"""
+        key = layer.strip().lower()
+        if key in self.cache:
+            return self.cache[key]
+        path = self.files.get(key)
+        img = None
+        if path is not None:
+            try:
+                img = ddstex.load_texture(path)
+            except Exception as exc:
+                if self.warn:
+                    self.warn(f"贴图 {path.name} 解码失败: {exc}")
+        self.cache[key] = img
+        return img
+
+    def for_asset(self, asset) -> dict:
+        """返回 ``{material_id: ndarray}``，供软光栅按材质取样。
+
+        先用材质 layer 里记的贴图名（准），没有再退回按材质名猜。
+        """
+        out = {}
+        layers = getattr(asset, "material_layers", [])
+        for i, name in enumerate(asset.materials):
+            img = None
+            for layer in (layers[i] if i < len(layers) else []):
+                img = self.by_layer(layer)
+                if img is not None:
+                    break
+            if img is None:
+                img = self.get(name)
+            if img is not None:
+                out[i] = img
+        return out
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,14 @@
 # -*- coding: utf-8 -*-
 """纯 numpy 软件光栅器：把蒙皮后的网格画成图片。
 
-预览器本身走 OpenGL（见 `viewer.py`），这里的软光栅用于**离线出图**：
-无窗口环境（CI、批处理、agent）也能确认"数据解出来到底长什么样"。
+预览器本身走 OpenGL（见 `glview.py`），这里的软光栅用于**离线出图**：
+无窗口环境（CI、批处理、AI agent）也能确认"数据解出来到底长什么样"。
+
+支持：
+
+* 逐材质贴图（albedo，按 UV 采样；alpha 低于阈值直接丢弃，头发镂空能出来）
+* 骨骼线段叠加（亮绿，穿透显示）
+* 地板网格（固定在世界 Y=0，和指标口径一致）
 """
 
 from __future__ import annotations
@@ -12,7 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image, ImageDraw
 
-#: 不同网格的默认底色（按网格序号轮换）
+#: 没有贴图时的兜底底色（按网格序号轮换）
 PALETTE = [
     (222, 214, 205),
     (196, 205, 222),
@@ -21,6 +27,8 @@ PALETTE = [
     (222, 209, 190),
     (200, 200, 200),
 ]
+
+BONE_COLOR = (70, 255, 120)
 
 
 @dataclass
@@ -60,10 +68,30 @@ class Camera:
         m[:3, 3] = -m[:3, :3] @ eye
         return m
 
+    def project(self, pts: np.ndarray):
+        """世界坐标 -> 屏幕坐标 (x, y) 与深度 z（给画骨骼线用）。"""
+        pts = np.asarray(pts, dtype=np.float64)
+        v = np.concatenate([pts, np.ones((len(pts), 1))], axis=1)
+        cam = v @ self.view().T
+        z = -cam[:, 2]
+        focal = (self.height * 0.5) / np.tan(np.radians(self.fov) * 0.5)
+        safe = np.where(z > self.near, z, 1.0)
+        sx = focal * cam[:, 0] / safe + (self.width - 1) * 0.5
+        sy = (self.height - 1) * 0.5 - focal * cam[:, 1] / safe
+        return np.stack([sx, sy], axis=1), z
+
 
 def _normalize(v: np.ndarray, axis=-1):
     n = np.linalg.norm(v, axis=axis, keepdims=True)
     return np.divide(v, np.where(n > 1e-12, n, 1.0))
+
+
+def _sample(tex: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """最近邻采样。X4 的 v 轴与图像一致（v=0 在顶部）。"""
+    h, w = tex.shape[:2]
+    xi = np.clip((np.mod(u, 1.0)) * w, 0, w - 1).astype(np.int32)
+    yi = np.clip((np.mod(v, 1.0)) * h, 0, h - 1).astype(np.int32)
+    return tex[yi, xi]
 
 
 def render(
@@ -73,8 +101,17 @@ def render(
     floor_y: float | None = None,
     floor_extent: float = 300.0,
     ambient: float = 0.32,
+    textures: dict | None = None,
+    bones=None,
+    bone_color=BONE_COLOR,
+    alpha_cutoff: float = 0.35,
 ) -> Image.Image:
-    """`parts` 是 [(mesh, positions, normals), ...]；返回 PIL 图像。"""
+    """``parts`` 是 ``[(mesh, positions, normals), ...]``。
+
+    :param textures: ``{material_id: (H,W,4)}``，或者与 ``parts`` 等长的列表
+                     （每个 part 一张表，用于多资产共用 material_id 的场景）
+    :param bones:    ``[(a, b), ...]`` 世界坐标线段，画在网格之上（穿透显示）
+    """
     w, h = camera.width, camera.height
     color = np.zeros((h, w, 3), dtype=np.float32)
     color[:] = np.array(background, dtype=np.float32) / 255.0
@@ -83,34 +120,42 @@ def render(
     view = camera.view()
     focal = (h * 0.5) / np.tan(np.radians(camera.fov) * 0.5)
     cx, cy = (w - 1) * 0.5, (h - 1) * 0.5
-
     light_dir = _normalize(np.array([0.35, 0.75, 0.55]))
 
-    tri_list = []
+    # 按「材质」而不是按「网格」分批：一个网格常含多个材质槽
+    groups = []
+    tex_list = textures if isinstance(textures, (list, tuple)) else None
     for mi, (mesh, pos, nrm) in enumerate(parts):
         if mesh.faces.size == 0:
             continue
-        tri_list.append((mesh, np.asarray(pos, dtype=np.float64), nrm, PALETTE[mi % len(PALETTE)]))
+        pos = np.asarray(pos, dtype=np.float64)
+        if tex_list is not None:
+            textures = tex_list[mi] if mi < len(tex_list) else None
+        subs = getattr(mesh, "submesh_material", None)
+        if subs:
+            for first, count, mat_id in subs:
+                if count > 0:
+                    groups.append((mesh, pos, nrm, mesh.faces[first:first + count], mat_id, mi))
+        else:
+            groups.append((mesh, pos, nrm, mesh.faces, None, mi))
 
     if floor_y is not None:
         g = floor_extent
-        pts = np.array(
-            [
-                [-g, floor_y, -g],
-                [g, floor_y, -g],
-                [g, floor_y, g],
-                [-g, floor_y, g],
-            ]
-        )
-        nrms = np.tile(np.array([0.0, 1.0, 0.0]), (4, 1))
+        pts = np.array([[-g, floor_y, -g], [g, floor_y, -g],
+                        [g, floor_y, g], [-g, floor_y, g]])
 
         class _Floor:
             faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
 
-        tri_list.insert(0, (_Floor(), pts, nrms, (58, 60, 68)))
+        groups.insert(0, (_Floor(), pts, np.tile(np.array([0.0, 1.0, 0.0]), (4, 1)),
+                          _Floor.faces, None, -1))
 
-    for mesh, pos, nrm, base in tri_list:
-        faces = mesh.faces
+    for mesh, pos, nrm, faces, mat_id, mi in groups:
+        base = (58, 60, 68) if mi < 0 else PALETTE[mi % len(PALETTE)]
+        tex = textures.get(mat_id) if (textures and mat_id is not None) else None
+        if tex is not None and getattr(mesh, "uvs", None) is None:
+            tex = None
+
         v = np.concatenate([pos, np.ones((pos.shape[0], 1))], axis=1)
         cam = v @ view.T
         z = -cam[:, 2]
@@ -130,24 +175,22 @@ def render(
         x1, y1 = sx[f[:, 1]], sy[f[:, 1]]
         x2, y2 = sx[f[:, 2]], sy[f[:, 2]]
 
+        fn = _normalize(np.cross(pos[f[:, 1]] - pos[f[:, 0]], pos[f[:, 2]] - pos[f[:, 0]]))
         if nrm is not None:
-            fn = _normalize(np.cross(pos[f[:, 1]] - pos[f[:, 0]], pos[f[:, 2]] - pos[f[:, 0]]))
             vn = (nrm[f[:, 0]] + nrm[f[:, 1]] + nrm[f[:, 2]]) / 3.0
             shade = np.abs(_normalize(vn) @ light_dir)
         else:
-            fn = _normalize(np.cross(pos[f[:, 1]] - pos[f[:, 0]], pos[f[:, 2]] - pos[f[:, 0]]))
             shade = np.abs(fn @ light_dir)
         lam = ambient + (1.0 - ambient) * shade
-        cols = np.clip(np.array(base, dtype=np.float64)[None, :] / 255.0 * lam[:, None], 0, 1)
 
-        minx = np.floor(np.minimum(np.minimum(x0, x1), x2)).astype(int)
-        maxx = np.ceil(np.maximum(np.maximum(x0, x1), x2)).astype(int)
-        miny = np.floor(np.minimum(np.minimum(y0, y1), y2)).astype(int)
-        maxy = np.ceil(np.maximum(np.maximum(y0, y1), y2)).astype(int)
-        minx = np.clip(minx, 0, w - 1)
-        maxx = np.clip(maxx, 0, w - 1)
-        miny = np.clip(miny, 0, h - 1)
-        maxy = np.clip(maxy, 0, h - 1)
+        uv = mesh.uvs[f] if tex is not None else None
+        if tex is None:
+            cols = np.clip(np.array(base, dtype=np.float64)[None, :] / 255.0 * lam[:, None], 0, 1)
+
+        minx = np.clip(np.floor(np.minimum(np.minimum(x0, x1), x2)).astype(int), 0, w - 1)
+        maxx = np.clip(np.ceil(np.maximum(np.maximum(x0, x1), x2)).astype(int), 0, w - 1)
+        miny = np.clip(np.floor(np.minimum(np.minimum(y0, y1), y2)).astype(int), 0, h - 1)
+        maxy = np.clip(np.ceil(np.maximum(np.maximum(y0, y1), y2)).astype(int), 0, h - 1)
 
         area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
         keep = (np.abs(area) > 1e-9) & (maxx >= minx) & (maxy >= miny)
@@ -157,11 +200,8 @@ def render(
         for i in np.nonzero(keep)[0]:
             bx0, bx1 = int(minx[i]), int(maxx[i])
             by0, by1 = int(miny[i]), int(maxy[i])
-            if bx1 - bx0 > w or by1 - by0 > h:
-                continue
-            xs = np.arange(bx0, bx1 + 1) + 0.5
-            ys = np.arange(by0, by1 + 1) + 0.5
-            gx, gy = np.meshgrid(xs, ys)
+            gx, gy = np.meshgrid(np.arange(bx0, bx1 + 1) + 0.5,
+                                 np.arange(by0, by1 + 1) + 0.5)
             d = area[i]
             w0 = ((x1[i] - gx) * (y2[i] - gy) - (x2[i] - gx) * (y1[i] - gy)) / d
             w1 = ((x2[i] - gx) * (y0[i] - gy) - (x0[i] - gx) * (y2[i] - gy)) / d
@@ -174,11 +214,33 @@ def render(
             closer = inside & (zi < sub_depth)
             if not closer.any():
                 continue
+
+            if tex is not None:
+                u = w0 * uv[i, 0, 0] + w1 * uv[i, 1, 0] + w2 * uv[i, 2, 0]
+                vv = w0 * uv[i, 0, 1] + w1 * uv[i, 1, 1] + w2 * uv[i, 2, 1]
+                rgba = _sample(tex, u, vv).astype(np.float64) / 255.0
+                if rgba.ndim == 3 and rgba.shape[-1] == 4:
+                    closer = closer & (rgba[:, :, 3] >= alpha_cutoff)
+                    if not closer.any():
+                        continue
+                px = np.clip(rgba[:, :, :3] * lam[i], 0, 1)
+            else:
+                px = np.broadcast_to(cols[i], (closer.shape[0], closer.shape[1], 3))
+
             sub_depth[closer] = zi[closer]
-            sub_color = color[by0:by1 + 1, bx0:bx1 + 1]
-            sub_color[closer] = cols[i]
+            color[by0:by1 + 1, bx0:bx1 + 1][closer] = px[closer]
 
     img = Image.fromarray((np.clip(color, 0, 1) * 255).astype(np.uint8), "RGB")
+
+    if bones:
+        draw = ImageDraw.Draw(img)
+        pts = np.array([p for seg in bones for p in seg], dtype=np.float64)
+        if len(pts) >= 2:
+            scr, z = camera.project(pts)
+            for k in range(0, len(pts) - 1, 2):
+                if z[k] <= camera.near or z[k + 1] <= camera.near:
+                    continue
+                draw.line([tuple(scr[k]), tuple(scr[k + 1])], fill=bone_color, width=2)
     return img
 
 

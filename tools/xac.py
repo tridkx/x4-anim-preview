@@ -135,6 +135,7 @@ class Asset:
     nodes: list[Node] = field(default_factory=list)
     meshes: list[Mesh] = field(default_factory=list)
     materials: list[str] = field(default_factory=list)
+    material_layers: list[list[str]] = field(default_factory=list)
     exporter: str = ""
     source_file: str = ""
     export_date: str = ""
@@ -205,15 +206,21 @@ def _read_nodes(r: _Reader) -> list[Node]:
     return nodes
 
 
-def _read_material(r: _Reader, material_id: int) -> str:
+def _read_material(r: _Reader, material_id: int):
+    """返回 ``(材质名, [贴图名, ...])``。
+
+    layer 里的字符串就是**贴图名**（如 ``lumine.face`` -> ``lumine_face_diff``），
+    比拿材质名去猜贴图准得多——实测一个图集常被多个材质共用。
+    """
     r.read(80)
     r.read(3)
     layer_count = r.byte()
     name = r.string()
+    layers = []
     for _ in range(layer_count):
         r.read(28)
-        r.string()
-    return name
+        layers.append(r.string())
+    return name, layers
 
 
 def _read_mesh(r: _Reader, mesh_id: int) -> Mesh:
@@ -347,7 +354,9 @@ def load_xac(path: str | Path, data: bytes | None = None) -> Asset:
         elif chunk_type == 3:
             # 注意：材质 chunk 的 length 只覆盖到材质名结束，**不含** layer 数据，
             # 所以这里必须按实际读到的位置推进（实测 len=129 的 chunk 实际有 191 字节）。
-            asset.materials.append(_read_material(r, len(asset.materials)))
+            mat_name, mat_layers = _read_material(r, len(asset.materials))
+            asset.materials.append(mat_name)
+            asset.material_layers.append(mat_layers)
         elif chunk_type == 1:
             asset.meshes.append(_read_mesh(r, len(asset.meshes)))
         elif chunk_type == 2:

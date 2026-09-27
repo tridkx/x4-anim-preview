@@ -121,6 +121,16 @@ python tools/ai_check.py --mod <mod目录> --out report/
 | `report/summary.txt` | 同样内容的人类可读版 |
 | `report/shots/<动画>.png` | 每个动画一张，从左到右是 `mod(t0) vanilla(t0) mod(t1) vanilla(t1)…` |
 
+**图里有什么**：mod 侧带 **albedo 贴图**（能看到颜色错位、纯黑、透明这类外观问题），
+两侧都叠**绿色骨骼线**（穿透显示，可直接核对骨架与几何是否对得上）。
+vanilla 侧保持纯色——它只是姿态基准，上贴图没意义还慢一倍。想关掉用
+`--no-textures` / `--no-bones`。
+
+贴图怎么找到的：xac 材质的 layer 里就记着贴图名（`lumine.face` → `lumine_face_diff`），
+按它精确匹配，实测 lumine / boru 的网格 **100% 命中**。比拿材质名去猜准得多——
+一个图集常被十几个材质共用（`face` / `eyebrow` / `eyelash` / `teeth` 全指向
+`lumine_face_diff`）。
+
 退出码 `0` = ok、`1` = warn、`2` = fail，可直接接进 CI。
 
 判据（越接近 1 越好）：
@@ -207,7 +217,10 @@ python tools/ai_check.py --mod <mod目录> --out report/
 
 ## 8. 已知限制
 
-- 只做**姿态**：不做贴图、材质通道、透明/双面，也不做法线贴图；检查外观请回游戏。
+- 贴图只上 **albedo（diffuse）**：normal / smooth / metal 通道和法线贴图没做，
+  所以"光照看起来不对"这类问题看不出来。透明只做了 alpha 裁剪（头发镂空能出来），
+  没做真正的半透明混合。
+- 贴图只覆盖 **mod 侧**；vanilla 侧始终纯色。
 - `ai_check.py` 的指标是**筛子不是判决**：长裙、大袖、披风这类远离骨骼的服装几何，
   关节撕裂天然偏高，报警后要对着 `shots/` 的图确认再下结论。
 - 只播**骨骼动画**：morph / 表情（viseme、blendshape）还没做，脸部细节看不到。
@@ -233,6 +246,7 @@ tools/
   animations.py     component -> 动画清单
   ai_check.py       给 AI/CI 的成果检查：一条命令出 JSON 判据 + 对比图
   metrics.py        量化判据（关节撕裂 / 两脚间距 / 离地 / 绕序 / 法线）
+  ddstex.py         DDS + BC1/BC3 解码（mod 贴图是 .gz 包着的 DDS）
   skeleton_check.py 骨架一致性校验
   render.py         纯 numpy 软光栅（离线出图用）
 examples/
