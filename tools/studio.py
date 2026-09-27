@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 
 import console  # noqa: F401  (设置 UTF-8 控制台)
 import animations as anims_mod
@@ -311,6 +311,98 @@ class StudioApp:
                 out.append(got)
         return out
 
+    def _pick_directory(self, initial: str) -> str | None:
+        """自己实现的目录选择器。
+
+        **不要用 ``filedialog``**：实测连"只开 tkinter、没有 pyglet"的裸环境里
+        ``askdirectory`` 都会卡住不返回（对话框根本不弹），和 pyglet 无关。
+        这里全部用普通 tkinter 控件搭，不碰任何原生对话框。
+        """
+        top = tk.Toplevel(self.root)
+        top.title("选择 mod 目录")
+        top.transient(self.root)
+        top.geometry("580x480")
+        top.minsize(460, 340)
+        result: dict = {"path": None}
+        cur = tk.StringVar(value=initial)
+
+        ttk.Label(top, text="路径（可直接粘贴，回车进入）", font=UI_FONT).pack(
+            anchor="w", padx=10, pady=(10, 2))
+        entry = ttk.Entry(top, textvariable=cur, font=MONO_FONT)
+        entry.pack(fill="x", padx=10)
+
+        info = ttk.Label(top, text="", style="Hint.TLabel", font=UI_FONT)
+        info.pack(anchor="w", padx=10, pady=(4, 0))
+
+        mid = ttk.Frame(top)
+        mid.pack(fill="both", expand=True, padx=10, pady=6)
+        listing = tk.Listbox(mid, font=MONO_FONT, activestyle="none", exportselection=False)
+        sb = ttk.Scrollbar(mid, orient="vertical", command=listing.yview)
+        listing.configure(yscrollcommand=sb.set)
+        listing.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+
+        def refresh(*_):
+            path = Path(cur.get().strip().strip('"'))
+            listing.delete(0, tk.END)
+            if not path.is_dir():
+                info.configure(text=f"× 不是目录：{path}")
+                return
+            try:
+                subs = sorted((d for d in path.iterdir() if d.is_dir()),
+                              key=lambda d: d.name.lower())
+            except OSError as exc:
+                info.configure(text=f"× 读不了：{exc}")
+                return
+            listing.insert(tk.END, "..")
+            for d in subs:
+                listing.insert(tk.END, d.name + "/")
+            n_xac = sum(1 for _ in path.rglob("*.xac"))
+            # 路径太长会撑破窗口，只显示尾部
+            shown = str(path)
+            if len(shown) > 54:
+                shown = "…" + shown[-53:]
+            info.configure(text=f"√ {shown}    子目录 {len(subs)} 个，.xac {n_xac} 个")
+
+        def enter(_event=None):
+            sel = listing.curselection()
+            path = Path(cur.get().strip().strip('"'))
+            if sel:
+                name = listing.get(sel[0])
+                path = (path.parent if name == ".." else path / name.rstrip("/"))
+            cur.set(str(path))
+            refresh()
+
+        def confirm(_event=None):
+            path = Path(cur.get().strip().strip('"'))
+            if path.is_dir():
+                result["path"] = str(path)
+                top.destroy()
+            else:
+                info.configure(text=f"× 不是目录：{path}")
+
+        listing.bind("<Double-Button-1>", enter)
+        listing.bind("<Return>", enter)
+        entry.bind("<Return>", lambda e: (refresh(), None)[1])
+        top.bind("<Escape>", lambda e: top.destroy())
+
+        btns = ttk.Frame(top)
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+        for label, cmd in (("上一级", lambda: (cur.set(str(Path(cur.get()).parent)), refresh())),
+                           ("主目录", lambda: (cur.set(str(Path.home())), refresh())),
+                           ("取消", top.destroy)):
+            ttk.Button(btns, text=label, width=8, command=cmd).pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="确定", width=8, command=confirm).pack(side="right")
+
+        refresh()
+        entry.focus_set()
+        self._modal = True
+        try:
+            top.wait_window()          # tkinter 自己的模态，不是原生对话框
+        finally:
+            self._modal = False
+        return result["path"]
+
     def _modal_call(self, fn, *args, **kwargs):
         """所有会弹出**模态**对话框的调用都要走这里。
 
@@ -372,7 +464,8 @@ class StudioApp:
                     if van:
                         new_scenes.append(scene_mod.Scene("vanilla", van))
         except Exception as exc:
-            self._modal_call(messagebox.showerror, "加载失败", str(exc))
+            self._set_status(f"加载失败：{exc}")
+            print(f"[error] 加载失败: {exc}")
             return
 
         if not new_scenes:
@@ -509,11 +602,7 @@ class StudioApp:
 
     def on_browse(self):
         start = self.cfg.get("last_browse") or str(self.current_mod_dir() or Path.home())
-        d = self._modal_call(
-            filedialog.askdirectory,
-            parent=self.root, title="选择 mod 目录（含 .xac）",
-            mustexist=True, initialdir=start,
-        )
+        d = self._pick_directory(start)
         if not d:
             return
         save_config({"last_browse": d})
@@ -636,6 +725,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="X4 动画预览器（图形界面）")
     ap.add_argument("--selftest", metavar="OUT.png",
                     help="启动后自动截图并退出（用来验证界面与渲染链路）")
+    ap.add_argument("--shot-dir", help="自检时额外把控制面板/选择器截图放到这里")
     ap.add_argument("--mod", help="启动时直接选中该 mod 目录")
     args = ap.parse_args(argv)
 
@@ -653,6 +743,7 @@ def main(argv=None):
 
     root = tk.Tk()
     app = StudioApp(root, game, cfg)
+    app.shot_dir = args.shot_dir
 
     if args.selftest:
         out = Path(args.selftest).resolve()
@@ -683,13 +774,36 @@ def main(argv=None):
                 if "lumine" in lab.lower() and "terran" in lab.lower():
                     target = path
             if target is not None:
-                real = filedialog.askdirectory
-                filedialog.askdirectory = lambda **kw: str(target)
+                real = app._pick_directory
+                app._pick_directory = lambda initial: str(target)
                 try:
                     app.on_browse()
                     steps.append(f"浏览 -> {target.name}")
                 finally:
-                    filedialog.askdirectory = real
+                    app._pick_directory = real
+
+                # 真实构造一次自绘选择器：截图后自己关掉，验证它不会卡住
+                def _snap_picker():
+                    tops = [w for w in app.root.winfo_children() if isinstance(w, tk.Toplevel)]
+                    if tops and app.shot_dir:
+                        try:
+                            from PIL import ImageGrab
+                            t = tops[0]
+                            t.update_idletasks()
+                            box = (t.winfo_rootx(), t.winfo_rooty(),
+                                   t.winfo_rootx() + t.winfo_width(),
+                                   t.winfo_rooty() + t.winfo_height())
+                            ImageGrab.grab(bbox=box).save(
+                                str(Path(app.shot_dir) / "dirpicker.png"))
+                            print(f"[selftest] 选择器截图 {box}")
+                        except Exception as exc:
+                            print(f"[selftest] 选择器截图失败: {exc}")
+                    for w in tops:
+                        w.destroy()
+
+                app.root.after(700, _snap_picker)
+                got = app._pick_directory(str(target))
+                steps.append(f"自绘选择器可开可关(返回 {got!r})")
 
             # 验证模态期间不会去 pump pyglet（"浏览"卡死就是这个原因）。
             # 注意别直接调 _tick——它会再注册一个 after 回调，攒起来会互相打架。
