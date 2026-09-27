@@ -115,7 +115,8 @@ def main(argv=None):
         if p.is_file():
             targets.append((p.name, p))
         else:
-            for f in sorted(p.rglob("*.xac")):
+            import scene as _scene
+            for f in sorted(_scene.iter_files(p, (".xac",))):
                 low = f.name.lower()
                 slot = "head" if "head" in low else ("torso" if "body" in low or "jacket" in low else None)
                 if slot:

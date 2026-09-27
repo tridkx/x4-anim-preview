@@ -25,13 +25,55 @@ HEAD_KEYS = ("head", "face", "hair")
 TORSO_KEYS = ("body", "torso", "jacket", "suit", "cloth", "shirt", "armor", "outfit")
 
 
+#: 递归扫描的默认上限。mod 目录实测最深 5~6 层、几十个文件；
+#: 而一旦用户把路径指到主目录，无界 rglob 会跑几分钟（几十万文件），
+#: 界面就直接卡死了。深度和时间双保险，宁可漏扫也不能卡。
+SCAN_MAX_DEPTH = 8
+SCAN_BUDGET_S = 2.0
+
+
+def iter_files(root: Path, suffixes: tuple[str, ...], max_depth: int = SCAN_MAX_DEPTH,
+               budget_s: float = SCAN_BUDGET_S, want_dirs: bool = False):
+    """有界递归查找。``suffixes`` 传空元组表示要全部文件。
+
+    :param want_dirs: 为 True 时连目录一起产出（用于找 ``textures`` 这类目录名）
+    """
+    import time as _time
+
+    deadline = _time.perf_counter() + budget_s
+    stack: list[tuple[Path, int]] = [(Path(root), 0)]
+    while stack:
+        d, depth = stack.pop()
+        if depth > max_depth or _time.perf_counter() > deadline:
+            return
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        for e in entries:
+            if _time.perf_counter() > deadline:   # 单个大目录的 scandir 也可能很慢
+                return
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    if want_dirs and (not suffixes or e.name.lower().endswith(suffixes)):
+                        yield Path(e.path)
+                    if depth < max_depth:
+                        stack.append((Path(e.path), depth + 1))
+                elif not want_dirs:
+                    low = e.name.lower()
+                    if not suffixes or low.endswith(suffixes):
+                        yield Path(e.path)
+            except OSError:
+                continue
+
+
 def resolve_asset(path: str | os.PathLike, game: x4game.GameArchive):
     """既接受磁盘路径，也接受游戏包内路径 / 目录。返回 ``(显示名, 字节)``。"""
     p = Path(path)
     if p.is_file():
         return p.name, p.read_bytes()
     if p.is_dir():
-        cands = sorted(p.rglob("*.xac"))
+        cands = sorted(iter_files(p, (".xac",)))
         if cands:
             return cands[0].name, cands[0].read_bytes()
         return None
@@ -58,7 +100,7 @@ def classify(name: str) -> str | None:
 def guess_mod_parts(mod_dir: Path):
     """从目录里挑出 head / torso 的 .xac。"""
     heads, torsos = [], []
-    for p in sorted(Path(mod_dir).rglob("*.xac")):
+    for p in sorted(iter_files(Path(mod_dir), (".xac",))):
         slot = classify(p.name)
         if slot == "head":
             heads.append(p)
@@ -82,7 +124,7 @@ def load_mod_sources(mod_dir: Path, limit: int = 2):
 def mod_asset_options(mod_dir: Path):
     """返回该目录下所有 .xac 及其槽位，供界面列出。"""
     out = []
-    for p in sorted(Path(mod_dir).rglob("*.xac")):
+    for p in sorted(iter_files(Path(mod_dir), (".xac",))):
         out.append((p, classify(p.name) or "other"))
     return out
 
@@ -103,7 +145,7 @@ def discover_mod_dirs(game: x4game.GameArchive | None = None,
             return
         if not path.is_dir() or path in found:
             return
-        if not any(path.rglob("*.xac")):
+        if not any(iter_files(path, (".xac",), max_depth=6, budget_s=0.5)):
             return
         found[path] = label
 
@@ -125,9 +167,8 @@ def discover_mod_dirs(game: x4game.GameArchive | None = None,
         for sub in sorted(root.iterdir()):
             if not sub.is_dir() or sub.name.startswith("."):
                 continue
-            for cand in sorted(sub.rglob("*")):
-                if not cand.is_dir():
-                    continue
+            for cand in sorted(iter_files(sub, (), max_depth=5, budget_s=1.5,
+                                          want_dirs=True)):
                 low = cand.name.lower()
                 if any(k in low for k in ("x4_", "x4-", "_mod", "mod_")):
                     rel = cand.relative_to(sub).as_posix()
@@ -189,7 +230,7 @@ class MaterialRules:
             root = Path(root)
             if not root.is_dir():
                 continue
-            for f in sorted(root.rglob("material_library.xml")):
+            for f in sorted(iter_files(root, ("material_library.xml",), max_depth=5)):
                 self._parse(f)
 
     def _parse(self, path: Path):
@@ -252,7 +293,7 @@ class TextureSet:
             root = Path(root)
             if not root.is_dir():
                 continue
-            for f in sorted(root.rglob("*")):
+            for f in sorted(iter_files(root, (), max_depth=6)):
                 if not f.is_file():
                     continue
                 # X4 的贴图是 "xxx_diff.gz"（不带 .dds 后缀），裸 dds 也一并支持

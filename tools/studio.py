@@ -25,6 +25,7 @@ from tkinter import messagebox, ttk
 
 import console  # noqa: F401  (设置 UTF-8 控制台)
 import animations as anims_mod
+import scene as scene_mod
 import glview
 import scene as scene_mod
 import x4game
@@ -357,7 +358,9 @@ class StudioApp:
             listing.insert(tk.END, "..")
             for d in subs:
                 listing.insert(tk.END, d.name + "/")
-            n_xac = sum(1 for _ in path.rglob("*.xac"))
+            # 必须有界！对主目录做无界 rglob 会跑几分钟，表现就是卡死
+            n_xac = sum(1 for _ in scene_mod.iter_files(path, (".xac",),
+                                                        max_depth=6, budget_s=0.4))
             # 路径太长会撑破窗口，只显示尾部
             shown = str(path)
             if len(shown) > 54:
@@ -422,6 +425,9 @@ class StudioApp:
         self._rebuild_now()
 
     def _rebuild_now(self):
+        # 让用户知道在处理（选了很大的目录时扫描要一两秒）
+        self._set_status("加载中…")
+        self.root.update_idletasks()
         sources: list[tuple[str, bytes]] = []
         mod_dir = self.current_mod_dir()
         if mod_dir is not None:
@@ -804,6 +810,16 @@ def main(argv=None):
                 app.root.after(700, _snap_picker)
                 got = app._pick_directory(str(target))
                 steps.append(f"自绘选择器可开可关(返回 {got!r})")
+
+                # 点"主目录"曾经会卡死：refresh 里对主目录做了无界 rglob。
+                # 现在扫描有界，这条路径必须能在 1 秒内走完。
+                import time as _t
+                t0 = _t.perf_counter()
+                app.root.after(800, lambda: [w.destroy() for w in app.root.winfo_children()
+                                             if isinstance(w, tk.Toplevel)])
+                app._pick_directory(str(Path.home()))
+                dt = _t.perf_counter() - t0
+                steps.append(f"主目录选择器 {dt:.2f}s{'  <== 太慢!' if dt > 1.5 else ''}")
 
             # 验证模态期间不会去 pump pyglet（"浏览"卡死就是这个原因）。
             # 注意别直接调 _tick——它会再注册一个 after 回调，攒起来会互相打架。
