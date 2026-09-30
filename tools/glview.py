@@ -53,6 +53,8 @@ class ViewState:
     show_bones: bool = False
     show_textures: bool = True
     loop: bool = True
+    #: 拖动方向反过来（相机跟着鼠标走）。默认是"模型跟着鼠标走"
+    drag_invert: bool = False
 
     def advance(self, dt: float, duration: float):
         if not self.playing or duration <= 0:
@@ -413,9 +415,14 @@ class PreviewWindow:
         def on_mouse_drag(x, y, dx, dy, buttons, modifiers):
             if not self._dragging:
                 return
+            # "模型跟着鼠标走"：往右拖模型就朝右转（相机绕到左边去），往上拖看到的
+            # 是模型底部——three.js 的 OrbitControls、Blender 的 MMB 都是这个手感。
+            # 早期两个轴都是反的（相机跟着鼠标走），拖起来左右上下全颠倒。
+            # 各人习惯不同，界面上给了"拖动反向"开关（state.drag_invert）。
+            sign = 1.0 if getattr(self.state, "drag_invert", False) else -1.0
             for cam in self.cameras:
-                cam.azimuth += dx * 0.4
-                cam.elevation = max(-85.0, min(85.0, cam.elevation + dy * 0.3))
+                cam.azimuth += sign * dx * 0.4
+                cam.elevation = max(-85.0, min(85.0, cam.elevation + sign * dy * 0.3))
 
         @win.event
         def on_mouse_scroll(x, y, sx, sy):

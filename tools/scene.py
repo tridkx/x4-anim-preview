@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 
 import numpy as np
 
@@ -97,36 +98,414 @@ def classify(name: str) -> str | None:
     return None
 
 
-def guess_mod_parts(mod_dir: Path):
-    """从目录里挑出 head / torso 的 .xac。"""
-    heads, torsos = [], []
-    for p in sorted(iter_files(Path(mod_dir), (".xac",))):
-        slot = classify(p.name)
-        if slot == "head":
-            heads.append(p)
-        elif slot == "torso":
-            torsos.append(p)
-    return heads, torsos
-
-
-def load_mod_sources(mod_dir: Path, limit: int = 2):
-    """按槽位挑出要加载的资产，返回 ``[(文件名, 字节)]``。
-
-    优先 head + torso 各一个；认不出槽位就退化成前 ``limit`` 个 .xac。
-    """
-    heads, torsos = guess_mod_parts(Path(mod_dir))
-    picked = heads[:1] + torsos[:1]
-    if not picked:
-        picked = [p for p, _ in mod_asset_options(mod_dir)[:limit]]
-    return [(p.name, p.read_bytes()) for p in picked]
-
-
 def mod_asset_options(mod_dir: Path):
     """返回该目录下所有 .xac 及其槽位，供界面列出。"""
     out = []
     for p in sorted(iter_files(Path(mod_dir), (".xac",))):
         out.append((p, classify(p.name) or "other"))
     return out
+
+
+# ---------------------------------------------------------------------------
+# mod 里的"多套模型"
+# ---------------------------------------------------------------------------
+#
+# 一个 mod 目录里往往不止一套模型：`python tools/build_all.py --outfits a,b`
+# 会同时产出 A/B 两套装扮（各一套 head + torso），有些包干脆是几个角色放一起。
+# 只认"第一个 head + 第一个 torso"就会把其余的整套吞掉——这正是预览器只能看到
+# 第一套模型的原因。判断"哪些文件属于同一套"有两个依据，按可靠程度排序：
+#
+# 1. **macro 的 ``<models>``**（最准）：游戏加载的就是 macro 里列的那几件，
+#    每一条 macro 就是一套模型。
+# 2. **文件名前缀**（退化）：``yue_a_head`` + ``yue_a_body`` 归成 ``yue_a``；
+#    但只有在"模型目录"（上两级目录，即 heads/ 与 bodies/ 的共同父目录）
+#    也一致时才归并——否则 ``dist/x4_rose_argon_add/.../rose_head`` 会和
+#    ``dist/x4_rose_argon_replace/.../rose_head`` 混成一套。
+
+#: macro 里 model 的槽位顺序（只影响列出顺序）
+SLOT_ORDER = ("head", "torso", "props", "props2")
+
+#: 槽位 -> 文件名关键词。head 优先于 torso，和 :func:`classify` 保持一致
+SLOT_KEYS = (("head", HEAD_KEYS), ("torso", TORSO_KEYS))
+
+_MACRO_BLOCK_RE = re.compile(r"<macro\b([^>]*?)(?:/>|>(.*?)</macro>)", re.S | re.I)
+_MODEL_TAG_RE = re.compile(r"<model\b([^>]*?)/?>", re.S | re.I)
+_XML_ATTR_RE = re.compile(r'([A-Za-z_][\w.-]*)\s*=\s*"([^"]*)"')
+
+#: ref 里这些值表示"这个槽位空着"，不是资产
+_EMPTY_REFS = ("", "none", "null", "-")
+
+
+@dataclass
+class ModelVariant:
+    """mod 里的**一套**模型（head + torso + …）。
+
+    ``key`` 用来在 config.json 里记住用户选了哪几套，``label`` 是给人看的名字，
+    ``hint`` 只在几套重名时才填（比如一个目录里塞了好几个 mod），指向它在哪个子目录。
+    """
+
+    key: str
+    label: str
+    parts: dict[str, Path]
+    origin: str = "macro"          # macro / group / others
+    hint: str = ""
+
+    def slot_names(self) -> list[str]:
+        known = [s for s in SLOT_ORDER if s in self.parts]
+        return known + sorted(s for s in self.parts if s not in SLOT_ORDER)
+
+    @property
+    def files(self) -> list[Path]:
+        return [self.parts[s] for s in self.slot_names()]
+
+    def slot_summary(self) -> str:
+        known = [s for s in SLOT_ORDER if s in self.parts]
+        n_other = len(self.parts) - len(known)
+        if n_other and not known:
+            return f"{n_other} 件"
+        return "+".join(known + ([f"其他×{n_other}"] if n_other else []))
+
+    def name(self) -> str:
+        """短名字（重名时带上目录提示），用于 HUD 和场景标签。"""
+        return f"{self.label} · {self.hint}" if self.hint else self.label
+
+    def display(self) -> str:
+        return f"{self.name()}   {self.slot_summary()}"
+
+
+def split_slot(stem: str) -> tuple[str | None, str]:
+    """把文件名拆成 ``(槽位, 前缀)``：``yue_a_head`` -> ``("head", "yue_a")``。
+
+    关键词取**最后一次**出现的位置：``char_arg_f_dyn_blend_head`` 的关键词在尾部，
+    前缀才是 ``char_arg_f_dyn_blend``。
+    """
+    low = stem.lower()
+    for slot, keys in SLOT_KEYS:
+        hit = max((low.rfind(k) for k in keys), default=-1)
+        if hit >= 0:
+            return slot, stem[:hit].rstrip("_-.") or stem
+    return None, stem
+
+
+def _model_dir(path: Path) -> str:
+    """文件的"模型目录"：上两级。
+
+    ``…/yueqingshu/heads/yue_a_head.xac`` 与 ``…/yueqingshu/bodies/yue_a_body.xac``
+    上两级都是 ``…/yueqingshu``，所以算同一套；而 ``dist/<modA>/…`` 与
+    ``dist/<modB>/…`` 不会互相归并。
+    """
+    return path.parent.parent.as_posix().lower()
+
+
+def _dir_hint(path: Path, mod_dir: Path) -> str:
+    """文件所在目录（相对 mod 根），重名时用来区分是哪一套。"""
+    try:
+        return "/".join(path.relative_to(mod_dir).parts[:-1]) or mod_dir.name
+    except ValueError:
+        return path.parent.name
+
+
+def _unique_hints(dirs: list[str]) -> list[str]:
+    """给一组目录算出"最短还能互相区分"的前缀。
+
+    ``dist/x4_lumine_argon_add/…`` 与 ``dist/x4_lumine_terran_add/…`` 只留
+    ``x4_lumine_argon_add`` / ``x4_lumine_terran_add``；差别在更深处时（CC 包那种
+    ``a/yue_a_head/…`` 与 ``a/yue_a_body/…``）就多留几段。
+    """
+    out = []
+    for i, s in enumerate(dirs):
+        need = 1
+        for j, t in enumerate(dirs):
+            if i == j:
+                continue
+            n = 0
+            while n < min(len(s), len(t)) and s[n] == t[n]:
+                n += 1
+            need = max(need, n + 1)
+        cut = s.find("/", need - 1)
+        out.append(s[:cut] if cut > 0 else s)
+    return out
+
+
+def _merge_halves(variants: list[ModelVariant]) -> list[ModelVariant]:
+    """把"只有一半"的两套合成一套。
+
+    CC 打包产物是每个资产一个目录（``a/yue_a_head/…`` 与 ``a/yue_a_body/…``），
+    按目录规则看它们是两套。这里只在**两个都只有一件、且槽位互补**时合并，
+    不会碰正常的成套资产。
+    """
+    out: list[ModelVariant] = []
+    for v in variants:
+        mate = None
+        for w in out:
+            if w.label != v.label or len(w.parts) != 1 or len(v.parts) != 1:
+                continue
+            if set(w.parts) != set(v.parts):
+                mate = w
+                break
+        if mate is None:
+            out.append(v)
+            continue
+        mate.parts.update(v.parts)
+    return out
+
+
+def resolve_model_ref(ref: str, mod_dir: Path, by_rel: dict, by_name: dict,
+                      prefer_dir: Path | None = None) -> Path | None:
+    """把 macro 里的 ``ref`` 落到磁盘上的 .xac。
+
+    ref 写的是**打包后**的路径（``extensions/x4_yueqingshu_mod/assets/…``），
+    而 mod 工程目录名常常不是那个名字（``x4_yue_argon_add``），所以依次尝试：
+    原路径 -> 去掉 ``extensions/<包名>/`` -> 相对路径尾部匹配 -> 只按文件名。
+    尾部匹配可能命中同一资产的多个副本（一个 mod 复制到了好几个目录），这时优先
+    取 **macro 自己所在的那份**（``prefer_dir``），否则取路径最短的。
+    """
+    r = (ref or "").strip().replace("\\", "/").strip("/")
+    if r.lower() in _EMPTY_REFS:
+        return None
+    cands = [r]
+    if r.lower().startswith("extensions/"):
+        bits = r.split("/", 2)
+        if len(bits) == 3:
+            cands.append(bits[2])
+    for c in cands:
+        rel = c if c.lower().endswith(".xac") else c + ".xac"
+        direct = mod_dir / rel
+        if direct.is_file():
+            return direct
+        if rel.lower() in by_rel:
+            return by_rel[rel.lower()]
+        tail = "/" + rel.lower()
+        hits = [(key, path) for key, path in by_rel.items() if key.endswith(tail)]
+        if hits:
+            if prefer_dir is not None:
+                for _key, path in hits:
+                    try:
+                        if path.is_relative_to(prefer_dir):
+                            return path
+                    except (OSError, ValueError):
+                        pass
+            return min(hits, key=lambda kv: len(kv[0]))[1]
+    # 路径都对不上（工程目录被改过名、ref 只写了一半）时最后才按文件名兜底：
+    # 同一份资产被复制到多个目录时可能选错，但总比整块模型消失强
+    for c in cands:
+        stem = Path(c if c.lower().endswith(".xac") else c + ".xac").stem.lower()
+        if stem in by_name:
+            return by_name[stem]
+    return None
+
+
+def iter_macro_models(mod_dir: Path):
+    """产出 ``(xml 路径, macro 名, [(槽位, ref), …])``——mod 里每条 macro 的模型清单。
+
+    只读 ``character_macros.xml``（找不到才退化成扫 mod 里所有 .xml）：mod 的
+    xml 也可能是 ``content.xml`` 这种，全读一遍既慢又容易误命中。
+    """
+    files = list(iter_files(mod_dir, ("character_macros.xml",), max_depth=6))
+    if not files:
+        files = list(iter_files(mod_dir, (".xml",), max_depth=6))
+    for f in sorted(files):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "<macro" not in text.lower():
+            continue
+        for m in _MACRO_BLOCK_RE.finditer(text):
+            name = dict(_XML_ATTR_RE.findall(m.group(1) or "")).get("name") or f.stem
+            parts: list[tuple[str, str]] = []
+            for tag in _MODEL_TAG_RE.finditer(m.group(2) or ""):
+                a = dict(_XML_ATTR_RE.findall(tag.group(1)))
+                ref = (a.get("ref") or "").strip()
+                if ref.lower() not in _EMPTY_REFS:
+                    parts.append(((a.get("type") or "?").lower(), ref))
+            if parts:
+                yield f, name, parts
+
+
+def macro_label(name: str) -> str:
+    """``character_argon_female_yue_a_macro`` -> ``yue_a``。"""
+    s = name
+    if s.lower().endswith("_macro"):
+        s = s[:-len("_macro")]
+    if s.lower().startswith("character_"):
+        s = s[len("character_"):]
+    for race in ("argon", "terran", "teladi", "paranid", "split", "boron"):
+        if s.lower().startswith(race):
+            s = s[len(race):].lstrip("_")
+            break
+    for sex in ("female", "male"):
+        if s.lower().startswith(sex):
+            s = s[len(sex):].lstrip("_")
+            break
+    return s or name
+
+
+def macro_model_variants(mod_dir: Path, files: list[Path]) -> list[ModelVariant]:
+    """按 macro 的 ``<models>`` 分组，每组一套模型。"""
+    by_rel: dict[str, Path] = {}
+    by_name: dict[str, Path] = {}
+    for p in files:
+        by_name.setdefault(p.stem.lower(), p)
+        try:
+            rel = p.relative_to(mod_dir).as_posix().lower()
+        except ValueError:
+            rel = p.name.lower()
+        by_rel.setdefault(rel, p)
+
+    out: list[ModelVariant] = []
+    seen: set[tuple] = set()
+    for xml_path, name, parts in iter_macro_models(mod_dir):
+        got: dict[str, Path] = {}
+        for slot, ref in parts:
+            p = resolve_model_ref(ref, mod_dir, by_rel, by_name,
+                                  prefer_dir=xml_path.parent.parent)
+            if p is not None:
+                got.setdefault(slot, p)
+        if not got:
+            continue
+        fingerprint = tuple(sorted(str(p) for p in got.values()))
+        if fingerprint in seen:      # 同一个资产被多条 macro 引用（add + replace）
+            continue
+        seen.add(fingerprint)
+        out.append(ModelVariant(key=name, label=macro_label(name), parts=got))
+    return out
+
+
+def group_model_variants(files: list[Path]) -> list[ModelVariant]:
+    """没有 macro 信息时，按文件名前缀把 head / torso 凑成一套。"""
+    groups: list[dict] = []
+    others: list[Path] = []
+    for p in sorted(files):
+        slot, prefix = split_slot(p.stem)
+        if slot is None:
+            others.append(p)
+            continue
+        target = None
+        for g in groups:
+            a, b = g["prefix"].lower(), prefix.lower()
+            if not (a == b or a.startswith(b) or b.startswith(a)):
+                continue
+            if _model_dir(g["path"]) != _model_dir(p):
+                continue             # 前缀相同但在不同模型目录：不是同一套
+            target = g
+            if len(prefix) < len(g["prefix"]):
+                g["prefix"] = prefix  # 收短成更一般的前缀（重叠取公共部分）
+            break
+        if target is None:
+            target = {"prefix": prefix, "path": p, "parts": {}, "extra": 0}
+            groups.append(target)
+        if slot in target["parts"]:
+            # 同一前缀下同槽位的第二件（比如两种发型）：另起一套，
+            # 既不叠着渲染，也不至于在列表里看不到
+            target["extra"] += 1
+            groups.append({"prefix": f"{target['prefix']} #{target['extra'] + 1}",
+                           "path": p, "parts": {slot: p}, "extra": 0})
+        else:
+            target["parts"][slot] = p
+
+    out = [ModelVariant(key=f"group:{g['prefix']}", label=g["prefix"], parts=g["parts"],
+                        origin="group")
+           for g in groups if g["parts"]]
+    if others:
+        # 认不出槽位的资产（比如自己拼的探针网格）打包成一套，
+        # 这样它们至少还能被看到，而不是从列表里消失
+        out.append(ModelVariant(key="group:*others", label="其他",
+                                parts={f"other{i}": p for i, p in enumerate(others)},
+                                origin="others"))
+    return out
+
+
+def mod_variants(mod_dir: Path) -> list[ModelVariant]:
+    """列出 mod 目录里能预览的**全部**模型（多套时全列出来）。
+
+    优先用 macro 的 ``<models>``（和游戏真正加载的一致）；macro 认不出来时按
+    文件名前缀分组。macro 没引用到的 .xac 也补在后面，免得被藏起来。
+    """
+    mod_dir = Path(mod_dir)
+    if not mod_dir.is_dir():
+        return []
+    files = sorted(iter_files(mod_dir, (".xac",)))
+    if not files:
+        return []
+    out = macro_model_variants(mod_dir, files)
+    if out:
+        used = {p.resolve() for v in out for p in v.files}
+        extra = [p for p in files if p.resolve() not in used]
+        if extra:
+            out = out + group_model_variants(extra)
+    else:
+        out = group_model_variants(files)
+    return _tidy_variants(_merge_halves(out), mod_dir)
+
+
+def _tidy_variants(variants: list[ModelVariant], mod_dir: Path) -> list[ModelVariant]:
+    """重名的加目录提示、key 去重，保证列表里能分辨、config 里能对上。"""
+    by_label: dict[str, list[ModelVariant]] = {}
+    for v in variants:
+        by_label.setdefault(v.label, []).append(v)
+    for group in by_label.values():
+        if len(group) < 2:
+            continue
+        hints = _unique_hints([_dir_hint(v.files[0], mod_dir) for v in group])
+        for v, h in zip(group, hints):
+            v.hint = h
+    used: set[str] = set()
+    for i, v in enumerate(variants):
+        if v.key in used:
+            v.key = f"{v.key}#{i}"
+        used.add(v.key)
+    return variants
+
+
+def match_variants(want: list[ModelVariant], others: list[ModelVariant]) -> list[ModelVariant]:
+    """在另一个 mod 里找出与 ``want`` 对应的那几套，用来并排对比。
+
+    迭代时最有用的是"这一版的 A 对上一版的 A"：先按 macro 名/key 对，再按显示名、
+    再按不带目录提示的短名，全对不上就退回对方的第一套。
+    """
+    if not others:
+        return []
+    keys = {v.key for v in want}
+    if keys:
+        hit = [v for v in others if v.key in keys]
+        if hit:
+            return hit
+    names = {v.name() for v in want}
+    if names:
+        hit = [v for v in others if v.name() in names]
+        if hit:
+            return hit
+    labels = {v.label for v in want}
+    if labels:
+        hit = [v for v in others if v.label in labels]
+        if hit:
+            return hit
+    return others[:1]
+
+
+def load_mod_sources(mod_dir: Path, limit: int | None = None, variant: str | None = None):
+    """挑出要加载的资产，返回 ``[(文件名, 字节)]``。
+
+    默认是第一套模型（head + torso + …），``variant`` 可以指名另一套
+    （给 :class:`ModelVariant` 的 ``key`` 或 ``label``）。认不出任何槽位时
+    退化成前 ``limit``（默认 2）个 .xac。
+    """
+    mod_dir = Path(mod_dir)
+    variants = mod_variants(mod_dir)
+    if variants:
+        pick = variants[0]
+        if variant:
+            for v in variants:
+                if variant in (v.key, v.label):
+                    pick = v
+                    break
+        files = pick.files
+        if limit:
+            files = files[:limit]
+        return [(p.name, p.read_bytes()) for p in files if p.is_file()]
+    picked = [p for p, _ in mod_asset_options(mod_dir)[:limit or 2]]
+    return [(p.name, p.read_bytes()) for p in picked]
 
 
 def discover_mod_dirs(game: x4game.GameArchive | None = None,
@@ -238,7 +617,6 @@ class MaterialRules:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return
-        import re
         for m in re.finditer(r'<material\s+name="([^"]+)"([^>]*)>', text):
             name, attrs = m.group(1), m.group(2)
             sh = re.search(r'shader="([^"]+)"', attrs)

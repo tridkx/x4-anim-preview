@@ -27,7 +27,6 @@ import console  # noqa: F401  (设置 UTF-8 控制台)
 import animations as anims_mod
 import scene as scene_mod
 import glview
-import scene as scene_mod
 import x4game
 import xsm
 
@@ -36,6 +35,62 @@ CONFIG_PATH = PROJECT_ROOT / "config.json"
 UI_FONT = ("Microsoft YaHei UI", 9)
 UI_FONT_BOLD = ("Microsoft YaHei UI", 9, "bold")
 MONO_FONT = ("Consolas", 9)
+
+#: 预览窗口最多分几屏。模型多的时候全选会切成十几个窄条，反而看不清
+MAX_PANES = 4
+
+
+def _elide(text: str, width: int) -> str:
+    """太长就中间省略——头尾都要留：名字在头，区分用的目录提示常在尾。"""
+    if len(text) <= width:
+        return text
+    head = max(6, width // 2 - 2)
+    return text[:head] + "…" + text[-(width - head - 1):]
+
+
+def grab_widget(path, widget) -> tuple[int, int, int, int]:
+    """给一个 tkinter 控件截图（自检和文档出图用）。
+
+    **不要**拿 ``winfo_rootx/rooty`` 去喂 ``ImageGrab.grab(bbox=…)``：实测截出来
+    的框整体偏几十像素，右边和下面各少一块。原因是两条坐标系不是一套：
+
+    * tkinter / GetWindowRect 给的是**进程虚拟坐标**（这台机器上 1707×1067，
+      显示器 150% 缩放）；
+    * ``ImageGrab.grab()`` 拿到的是**物理像素**（2560×1600）。
+
+    所以整屏截图后按比例换算再裁剪，返回裁剪框（图像像素）。
+    """
+    from PIL import ImageGrab
+
+    widget.update_idletasks()
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Rect(ctypes.Structure):
+            _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
+                        ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+        rc = _Rect()
+        ctypes.windll.user32.GetWindowRect(widget.winfo_id(), ctypes.byref(rc))
+        left, top, right, bottom = rc.left, rc.top, rc.right, rc.bottom
+        vw = ctypes.windll.user32.GetSystemMetrics(0)
+        vh = ctypes.windll.user32.GetSystemMetrics(1)
+    except Exception:                      # 拿不到就走 tkinter 自己的坐标
+        left, top = widget.winfo_rootx(), widget.winfo_rooty()
+        right = left + widget.winfo_width()
+        bottom = top + widget.winfo_height()
+        vw = vh = 0
+
+    img = ImageGrab.grab()
+    if vw > 0 and vh > 0 and (img.width != vw or img.height != vh):
+        sx, sy = img.width / vw, img.height / vh
+        box = (round(left * sx), round(top * sy), round(right * sx), round(bottom * sy))
+    else:
+        box = (left, top, right, bottom)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    img.crop(box).save(str(path))
+    return box
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +132,12 @@ class StudioApp:
         self.anim_refs: list[anims_mod.AnimRef] = []
         self.shown: list[anims_mod.AnimRef] = []
         self.anim_cache: dict[str, xsm.Xsm] = {}
+        #: 当前 mod 里的全部模型（一个 mod 可以有好几套：多套装扮、多个角色…）
+        self.variants: list[scene_mod.ModelVariant] = []
+        #: 选中的那几套（key 集合）——选多套就并排显示
+        self.picked: set[str] = set()
+        self._file_cache: dict[Path, bytes] = {}
+        self._materials_cache: dict[Path, tuple] = {}
         self._updating_scale = False
         self._status = "就绪"
         self._closing = False
@@ -95,6 +156,7 @@ class StudioApp:
         self.textures_var = tk.BooleanVar(value=bool(cfg.get("textures", True)))
         self.loop_var = tk.BooleanVar(value=True)
         self.autoplay_var = tk.BooleanVar(value=False)
+        self.drag_invert_var = tk.BooleanVar(value=bool(cfg.get("drag_invert", False)))
         self.speed_var = tk.DoubleVar(value=1.0)
         self.time_var = tk.DoubleVar(value=0.0)
 
@@ -110,9 +172,9 @@ class StudioApp:
         r = self.root
         r.title("X4 动画预览器")
         sh = r.winfo_screenheight()
-        default = f"356x{max(560, min(880, sh - 120))}"
+        default = f"356x{max(620, min(880, sh - 120))}"
         r.geometry(self.cfg.get("studio_geometry") or default)
-        r.minsize(330, 560)
+        r.minsize(340, 620)
 
         style = ttk.Style()
         try:
@@ -129,8 +191,8 @@ class StudioApp:
 
         self.blocks["assets"] = self._build_assets(outer)
         self.blocks["playback"] = self._build_playback(outer)  # 放列表之前，空间不足也不会被挤掉
+        self.blocks["status"] = self._build_status(outer)      # 同上：贴底先占位
         self.blocks["anims"] = self._build_anims(outer)
-        self.blocks["status"] = self._build_status(outer)
 
     def _build_assets(self, parent):
         box = ttk.LabelFrame(parent, text="1. 选择 mod", padding=8)
@@ -145,6 +207,31 @@ class StudioApp:
         ttk.Button(row, text="重扫", width=6, command=self._load_mods).pack(side="left", padx=(4, 0))
         ttk.Button(row, text="重载", width=6,
                    command=self._reload_assets).pack(side="left", padx=(4, 0))
+
+        # 模型列表：一个 mod 里可能有好几套模型（`build_all.py --outfits a,b` 的
+        # A/B 套装就是两套 head+torso），早先只认第一套、其余的整套都看不到。
+        # 点一下切换显示；同时选几套就分屏并排。
+        mrow = ttk.Frame(box)
+        mrow.pack(fill="x", pady=(6, 0))
+        ttk.Label(mrow, text="模型（点选，可多选）").pack(side="left")
+        self.variant_count = ttk.Label(mrow, text="", style="Hint.TLabel")
+        self.variant_count.pack(side="left", padx=(4, 0))
+        ttk.Button(mrow, text="全选", width=6,
+                   command=lambda: self.pick_variants(all=True)).pack(side="right")
+        ttk.Button(mrow, text="清空", width=6,
+                   command=lambda: self.pick_variants(all=False)).pack(side="right", padx=(0, 4))
+
+        mwrap = ttk.Frame(box)
+        mwrap.pack(fill="x", pady=(2, 0))
+        self.variant_list = tk.Listbox(mwrap, font=MONO_FONT, activestyle="none",
+                                       exportselection=False, height=3, selectmode="browse")
+        vsb = ttk.Scrollbar(mwrap, orient="vertical", command=self.variant_list.yview)
+        self.variant_list.configure(yscrollcommand=vsb.set)
+        self.variant_list.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="left", fill="y")
+        self.variant_list.bind("<Button-1>", self.on_variant_click)
+        self.variant_list.bind("<space>", self.on_variant_key)
+        self.variant_list.bind("<Return>", self.on_variant_key)
 
         row2 = ttk.Frame(box)
         row2.pack(fill="x", pady=(6, 0))
@@ -246,9 +333,17 @@ class StudioApp:
 
     def _build_status(self, parent):
         box = ttk.Frame(parent)
-        box.pack(fill="x")
+        # side="bottom" + 排在动画列表**之前** pack：窗口矮的时候先给状态栏留位置，
+        # 让可以伸缩的动画列表去吃剩下的空间（否则状态栏会被挤成 1px 看不见）
+        box.pack(side="bottom", fill="x")
         self.status = ttk.Label(box, text="", font=UI_FONT, wraplength=330, justify="left")
         self.status.pack(fill="x")
+        opt = ttk.Frame(box)
+        opt.pack(fill="x", pady=(2, 0))
+        ttk.Checkbutton(opt, text="拖动反向", variable=self.drag_invert_var,
+                        command=self.sync_state).pack(side="left")
+        ttk.Label(opt, text="（默认：模型跟着鼠标转）",
+                  style="Hint.TLabel").pack(side="left", padx=(4, 0))
         ttk.Label(box, text="快捷键：空格 播放/暂停 · ←→ 换动画 · , . 逐帧 · B 骨骼 · "
                             "N 网格 · R 重置相机 · 鼠标拖动旋转 · 滚轮缩放",
                   style="Hint.TLabel", wraplength=330, justify="left").pack(fill="x", pady=(4, 0))
@@ -293,6 +388,15 @@ class StudioApp:
             for label, path in dirs:
                 if want and str(path) == want:
                     pick = label
+            if pick is None and want and Path(want).is_dir():
+                # config 里记的目录不在自动发现的结果里（名字不像 mod 目录，
+                # 或是手动浏览进来的）：补一条，免得 --mod / 上次的选择失效
+                pick = f"[手动] {Path(want).name}"
+                self.mod_dirs = list(self.mod_dirs) + [(pick, Path(want))]
+                labels = labels + [pick]
+                self.mod_combo.configure(values=labels)
+                self.compare_combo.configure(
+                    values=["vanilla"] + [lab for lab, _ in self.mod_dirs])
             self.mod_var.set(pick or (labels[1] if len(labels) > 1 else labels[0]))
         self._set_status(f"发现 {len(dirs)} 个 mod 目录")
         self.rebuild()
@@ -303,6 +407,97 @@ class StudioApp:
             if lab == label:
                 return path
         return None
+
+    # -- 模型（一个 mod 里可能有好几套） -----------------------------------
+    def _load_variants(self):
+        """扫描当前 mod 里的全部模型，恢复/决定选哪几套。"""
+        mod_dir = self.current_mod_dir()
+        self.variants = scene_mod.mod_variants(mod_dir) if mod_dir is not None else []
+        self._file_cache.clear()
+        keys = [v.key for v in self.variants]
+        saved = (self.cfg.get("variant_pick") or {}).get(str(mod_dir)) if mod_dir else None
+        if saved:
+            self.picked = {k for k in saved if k in keys}
+        elif keys:
+            # 模型不多就默认全显示——一眼看到 mod 里到底有几套；多了只放第一套，
+            # 免得分成十几个窄条（要全看可以点"全选"）
+            room = MAX_PANES - (1 if self.compare_var.get() else 0)
+            self.picked = set(keys[:room]) if len(keys) <= room else {keys[0]}
+        else:
+            self.picked = set()
+        self._refill_variant_list()
+
+    def selected_variants(self) -> list[scene_mod.ModelVariant]:
+        return [v for v in self.variants if v.key in self.picked]
+
+    def _refill_variant_list(self, keep: int | None = None):
+        self.variant_list.delete(0, tk.END)
+        for v in self.variants:
+            mark = "x" if v.key in self.picked else " "
+            self.variant_list.insert(tk.END, f"[{mark}] {_elide(v.display(), 42)}")
+        total = len(self.variants)
+        self.variant_count.configure(
+            text=f"{len(self.picked)}/{total}" if total else "（没有 .xac）")
+        if keep is not None and 0 <= keep < total:
+            self.variant_list.selection_clear(0, tk.END)
+            self.variant_list.selection_set(keep)
+            self.variant_list.activate(keep)
+
+    def on_variant_click(self, event):
+        idx = self.variant_list.nearest(event.y)
+        if not (0 <= idx < len(self.variants)):
+            return
+        bbox = self.variant_list.bbox(idx)      # 点在列表下方的空白处不算
+        if bbox is None or not (bbox[1] <= event.y <= bbox[1] + bbox[3]):
+            return
+        self.toggle_variant(self.variants[idx].key, idx)
+
+    def on_variant_key(self, event):
+        sel = self.variant_list.curselection()
+        if sel and sel[0] < len(self.variants):
+            self.toggle_variant(self.variants[sel[0]].key, sel[0])
+        return "break"
+
+    def toggle_variant(self, key: str, idx: int | None = None):
+        if key in self.picked:
+            self.picked.discard(key)
+        else:
+            self.picked.add(key)
+        self._refill_variant_list(keep=idx)
+        self._rebuild_now()
+
+    def pick_variants(self, all: bool):
+        self.picked = {v.key for v in self.variants} if all else set()
+        self._refill_variant_list(keep=0 if self.variants else None)
+        self._rebuild_now()
+
+    def _variant_sources(self, v: scene_mod.ModelVariant) -> list[tuple[str, bytes]]:
+        """读该套模型的字节（按文件缓存，来回切换不用反复读盘）。"""
+        out: list[tuple[str, bytes]] = []
+        for p in v.files:
+            raw = self._file_cache.get(p)
+            if raw is None:
+                try:
+                    raw = p.read_bytes()
+                except OSError as exc:
+                    self._set_status(f"读不了 {p.name}：{exc}")
+                    continue
+                self._file_cache[p] = raw
+            out.append((p.name, raw))
+        return out
+
+    def _mod_materials(self, mod_dir: Path):
+        """该 mod 的贴图表与材质规则（一次扫描，多个模型共用）。"""
+        got = self._materials_cache.get(mod_dir)
+        if got is None:
+            ts = scene_mod.TextureSet([mod_dir], warn=self._set_status)
+            got = (ts if len(ts) else None, scene_mod.MaterialRules([mod_dir]))
+            self._materials_cache[mod_dir] = got
+        return got
+
+    def _remember(self, values: dict):
+        save_config(values)
+        self.cfg.update(values)
 
     def _vanilla_sources(self):
         out = []
@@ -421,54 +616,31 @@ class StudioApp:
             self._modal = False
 
     def rebuild(self):
-        """按当前选择重建场景。"""
+        """按当前选择重建场景（会重扫 mod 里的模型）。"""
+        self._load_variants()
         self._rebuild_now()
 
     def _rebuild_now(self):
         # 让用户知道在处理（选了很大的目录时扫描要一两秒）
         self._set_status("加载中…")
         self.root.update_idletasks()
-        sources: list[tuple[str, bytes]] = []
         mod_dir = self.current_mod_dir()
-        if mod_dir is not None:
-            heads, torsos = scene_mod.guess_mod_parts(mod_dir)
-            picked = (heads[:1] + torsos[:1])
-            if not picked:
-                options = scene_mod.mod_asset_options(mod_dir)
-                picked = [p for p, _ in options[:2]]
-            for p in picked:
-                sources.append((p.name, p.read_bytes()))
-            save_config({"last_mod": str(mod_dir)})
-
+        picked = self.selected_variants()
+        mod_scenes: list[scene_mod.Scene] = []
         new_scenes: list[scene_mod.Scene] = []
         try:
-            if sources:
-                tex = rules = None
-                if mod_dir is not None:
-                    ts = scene_mod.TextureSet([mod_dir], warn=self._set_status)
-                    tex = ts if len(ts) else None
-                    rules = scene_mod.MaterialRules([mod_dir])
-                new_scenes.append(scene_mod.Scene("mod", sources, textures=tex,
-                                                  material_rules=rules))
+            if mod_dir is not None and picked:
+                tex, rules = self._mod_materials(mod_dir)
+                for v in picked:
+                    scene = self._make_scene(v.name(), v, tex, rules)
+                    if scene is not None:
+                        mod_scenes.append(scene)
+                new_scenes.extend(mod_scenes)
+                self._remember({"last_mod": str(mod_dir), "variant_pick": {
+                    **(self.cfg.get("variant_pick") or {}),
+                    str(mod_dir): [v.key for v in picked]}})
             if self.compare_var.get() or not new_scenes:
-                target = self.compare_target_var.get()
-                other_dir = None
-                for lab, path in getattr(self, "mod_dirs", []):
-                    if lab == target:
-                        other_dir = path
-                if other_dir is not None:
-                    # 与另一个 mod 对比：迭代时"上一版 vs 这一版"比对着 vanilla 更有用
-                    src = scene_mod.load_mod_sources(other_dir)
-                    if src:
-                        ots = scene_mod.TextureSet([other_dir], warn=self._set_status)
-                        new_scenes.append(scene_mod.Scene(
-                            f"mod:{other_dir.name}", src,
-                            textures=ots if len(ots) else None,
-                            material_rules=scene_mod.MaterialRules([other_dir])))
-                else:
-                    van = self._vanilla_sources()
-                    if van:
-                        new_scenes.append(scene_mod.Scene("vanilla", van))
+                new_scenes.extend(self._compare_scenes(picked))
         except Exception as exc:
             self._set_status(f"加载失败：{exc}")
             print(f"[error] 加载失败: {exc}")
@@ -488,14 +660,62 @@ class StudioApp:
         if self.shown:
             self.on_pick_anim(force=True)
 
-        desc = " + ".join(f"{s.label}({s.info()})" for s in self.scenes)
-        if self.scenes and self.scenes[0].label == "mod":
-            hit, total = self.scenes[0].texture_stats()
-            if total:
-                desc += f"  贴图 {hit}/{total}"
-        hint = mod_dir.name if mod_dir else "仅 vanilla"
-        self.asset_hint.configure(text=f"{hint}\n{desc}")
+        self._update_asset_hint(mod_dir, mod_scenes, picked)
         self._set_status("场景已加载")
+
+    def _make_scene(self, label: str, v: scene_mod.ModelVariant, tex, rules):
+        """建一个场景；某一套坏了只跳过它，不让它把整个预览拖没。"""
+        try:
+            sources = self._variant_sources(v)
+            if not sources:
+                return None
+            return scene_mod.Scene(label, sources, textures=tex, material_rules=rules)
+        except Exception as exc:
+            self._set_status(f"{v.name()} 加载失败：{exc}")
+            print(f"[error] {v.name()} 加载失败: {exc}")
+            return None
+
+    def _compare_scenes(self, want: list[scene_mod.ModelVariant]) -> list[scene_mod.Scene]:
+        """对比侧的场景：另一个 mod（同名模型对同名模型）或 vanilla。"""
+        out: list[scene_mod.Scene] = []
+        target = self.compare_target_var.get()
+        other_dir = None
+        for lab, path in getattr(self, "mod_dirs", []):
+            if lab == target:
+                other_dir = path
+        if other_dir is None:
+            van = self._vanilla_sources()
+            if van:
+                out.append(scene_mod.Scene("vanilla", van))
+            return out
+
+        # 与另一个 mod 对比：迭代时"上一版 vs 这一版"比对着 vanilla 更有用。
+        # 两边套数一致时按套对上（这一版的 A 对上一版的 A），对不上就退回第一套。
+        otex, orules = self._mod_materials(other_dir)
+        others = scene_mod.mod_variants(other_dir)
+        for v in scene_mod.match_variants(want, others):
+            scene = self._make_scene(f"{other_dir.name}·{v.name()}", v, otex, orules)
+            if scene is not None:
+                out.append(scene)
+        return out
+
+    def _update_asset_hint(self, mod_dir, mod_scenes, picked):
+        lines = [mod_dir.name] if mod_dir is not None else ["仅 vanilla"]
+        if not picked and self.variants:
+            lines.append("没有选中的模型：在上面的列表里点一下（可多选并排）")
+        elif picked and len(self.variants) > 1:
+            names = "、".join(v.name() for v in picked)
+            lines.append(f"显示 {len(picked)}/{len(self.variants)} 套：{_elide(names, 60)}")
+        if mod_scenes:
+            verts = sum(s.vertex_count for s in mod_scenes)
+            match = sum(s.matched() for s in mod_scenes) / len(mod_scenes)
+            hit = sum(s.texture_stats()[0] for s in mod_scenes)
+            total = sum(s.texture_stats()[1] for s in mod_scenes)
+            txt = f"{len(mod_scenes)} 套模型 / {verts} 顶点 / 动画匹配 {match:.0%}"
+            if total:
+                txt += f" / 贴图 {hit}/{total}"
+            lines.append(txt)
+        self.asset_hint.configure(text="\n".join(lines))
 
     def _open_preview(self):
         self.root.update_idletasks()
@@ -591,6 +811,7 @@ class StudioApp:
         self.state.show_bones = self.bones_var.get()
         self.state.show_textures = self.textures_var.get()
         self.state.speed = float(self.speed_var.get())
+        self.state.drag_invert = self.drag_invert_var.get()
 
     def reset_camera(self):
         if self.preview:
@@ -626,6 +847,7 @@ class StudioApp:
     def _reload_assets(self):
         """重新读磁盘上的 .xac / 贴图（改完 mod 不用切来切去）。"""
         self.anim_cache.clear()
+        self._materials_cache.clear()
         self.rebuild()
         self._set_status("已重新加载资产")
 
@@ -680,6 +902,7 @@ class StudioApp:
             "component": self.component_var.get(),
             "textures": self.textures_var.get(),
             "compare_target": self.compare_target_var.get(),
+            "drag_invert": self.drag_invert_var.get(),
         })
         if self.preview and not self.preview.closed:
             self.preview.close()
@@ -762,6 +985,58 @@ def main(argv=None):
                 app.mod_var.set(labels[2])
                 app.on_mod_change()
                 steps.append(f"切到 {labels[2]}")
+            steps.append(f"模型 {len(app.variants)} 套，选中 {len(app.picked)}"
+                         + ("（" + "、".join(v.name() for v in app.selected_variants()) + "）"
+                            if app.variants else ""))
+            # 一个 mod 里有多套模型时：切换选择 -> 场景数要跟着变
+            if len(app.variants) > 1:
+                first = app.variants[0].key
+                app.toggle_variant(first, 0)
+                after_off = len(app.scenes)
+                app.toggle_variant(first, 0)
+                after_on = len(app.scenes)
+                steps.append(f"切模型：取消后 {after_off} 屏 / 选回后 {after_on} 屏")
+                if after_on <= after_off:
+                    steps.append("  <== 多选没有变成多屏!")
+            else:
+                app.pick_variants(all=True)
+                steps.append(f"全选 -> {len(app.scenes)} 屏")
+            # 拖动方向：往右拖，方位角要**变小**（模型跟着鼠标走）
+            def _fake_drag(dx, dy):
+                """模拟一次鼠标拖动。
+
+                注意 pyglet 的窗口在正常状态下会把外部调用的 dispatch_event
+                塞进事件队列（见 BaseWindow.dispatch_event），这里临时打开直通
+                开关，等价于主循环 pump 里那次派发。
+                """
+                win = app.preview.window
+                app.preview._dragging = True
+                old = win._allow_dispatch_event
+                win._allow_dispatch_event = True
+                try:
+                    win.dispatch_event("on_mouse_drag", 200, 200, dx, dy, 1, 0)
+                finally:
+                    win._allow_dispatch_event = old
+                    app.preview._dragging = False
+
+            cam = app.preview.camera
+            before = cam.azimuth
+            _fake_drag(60, 0)
+            steps.append(f"向右拖 60px：方位角 {before:.1f}° -> {cam.azimuth:.1f}°"
+                         + ("（反了!）" if cam.azimuth >= before else "（模型跟着鼠标 ✓）"))
+            before = cam.elevation
+            _fake_drag(0, 60)
+            steps.append(f"向上拖 60px：仰角 {before:.1f}° -> {cam.elevation:.1f}°"
+                         + ("（反了!）" if cam.elevation >= before else "（模型跟着鼠标 ✓）"))
+            app.drag_invert_var.set(True)
+            app.sync_state()
+            before = cam.azimuth
+            _fake_drag(60, 0)
+            steps.append(f"勾上'拖动反向'：方位角 {before:.1f}° -> {cam.azimuth:.1f}°"
+                         + ("（没生效!）" if cam.azimuth <= before else "（相机跟着鼠标 ✓）"))
+            app.drag_invert_var.set(False)
+            app.sync_state()
+            app.reset_camera()
             for i in (1, 5, 12):
                 if len(app.shown) > i:
                     app.anim_list.selection_clear(0, tk.END)
@@ -793,14 +1068,7 @@ def main(argv=None):
                     tops = [w for w in app.root.winfo_children() if isinstance(w, tk.Toplevel)]
                     if tops and app.shot_dir:
                         try:
-                            from PIL import ImageGrab
-                            t = tops[0]
-                            t.update_idletasks()
-                            box = (t.winfo_rootx(), t.winfo_rooty(),
-                                   t.winfo_rootx() + t.winfo_width(),
-                                   t.winfo_rooty() + t.winfo_height())
-                            ImageGrab.grab(bbox=box).save(
-                                str(Path(app.shot_dir) / "dirpicker.png"))
+                            box = grab_widget(Path(app.shot_dir) / "dirpicker.png", tops[0])
                             print(f"[selftest] 选择器截图 {box}")
                         except Exception as exc:
                             print(f"[selftest] 选择器截图失败: {exc}")
@@ -827,6 +1095,15 @@ def main(argv=None):
             modal_ok = not app._should_pump()
             app._modal = False
             steps.append(f"模态期间跳过 pump: {modal_ok}")
+            if args.mod:
+                # 上面几步把 mod 换走了，截图前切回 --mod 指定的那个
+                want = str(Path(args.mod).resolve())
+                for lab, path in getattr(app, "mod_dirs", []):
+                    if str(path) == want:
+                        app.mod_var.set(lab)
+                        app.on_mod_change()
+                        steps.append(f"回到 {lab}（模型 {len(app.variants)} 套 / "
+                                     f"{len(app.scenes)} 屏）")
             app.bones_var.set(True)
             app.sync_state()
             steps.append("开骨骼显示")
@@ -866,17 +1143,13 @@ def main(argv=None):
                         print(f"[selftest]   {name:9s} y={y:5d} h={hh:5d} 底={y+hh:5d}{flag}")
                     print("[selftest] 布局" + ("有问题" if overflow else "完整可见 ✓"))
                     try:
-                        from PIL import ImageGrab
                         r.lift()
                         r.attributes("-topmost", True)
                         r.update()
                         time.sleep(0.5)
                         r.update()
-                        box = (r.winfo_rootx(), r.winfo_rooty(),
-                               r.winfo_rootx() + r.winfo_width(),
-                               r.winfo_rooty() + r.winfo_height())
                         panel = out.with_name(out.stem + "_panel.png")
-                        ImageGrab.grab(bbox=box).save(panel)
+                        box = grab_widget(panel, r)
                         print(f"[selftest] 面板截图 {panel}  {box}")
                     except Exception as exc:
                         print(f"[selftest] 面板截图失败: {exc}")

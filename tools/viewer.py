@@ -9,6 +9,9 @@
     python tools/viewer.py --mod <mod目录>          # 与 vanilla 并排播放
     python tools/viewer.py --vanilla                # 只看 vanilla 基准
     python tools/viewer.py --body a.xac --head b.xac
+    python tools/viewer.py --mod <dir> --all-variants        # mod 里每套模型各占一格
+    python tools/viewer.py --mod <dir> --variant yue_b       # 只看其中一套
+    python tools/viewer.py --mod <dir> --list-variants       # 列出这个 mod 有几套模型
     python tools/viewer.py --mod <dir> --anim anim_stand_idle_05 \
         --shot out.png --frames 0,15,30,45          # 不开窗口，直接出对比图
 
@@ -33,6 +36,59 @@ import x4game
 import xsm
 
 
+def mod_textures(mod_dir: Path, args):
+    rules = scene_mod.MaterialRules([mod_dir])
+    tex = None
+    if not args.no_textures:
+        ts = scene_mod.TextureSet([mod_dir])
+        tex = ts if len(ts) else None
+    return tex, rules
+
+
+def add_mod_scenes(scenes: list, mod_dir: Path, args, label_prefix: str = "",
+                   only_variant: str | None = None):
+    """把一个 mod 目录加进场景。里面有**多套模型**时默认只加第一套。
+
+    ``--all-variants`` 会把每套各加一格（并排看两套装扮的差别），
+    ``--variant`` 则指名一套。返回实际加进去的套数。
+    """
+    variants = scene_mod.mod_variants(mod_dir)
+    tex, rules = mod_textures(mod_dir, args)
+    if not variants:                     # 认不出槽位：退回旧行为（前两件）
+        src = scene_mod.load_mod_sources(mod_dir)
+        if src:
+            scenes.append(scene_mod.Scene(label_prefix or "mod", src, delta=args.delta,
+                                          textures=tex, material_rules=rules))
+            return 1
+        return 0
+
+    if len(variants) > 1:
+        print(f"[mod] {mod_dir.name} 里有 {len(variants)} 套模型：" +
+              "、".join(v.name() for v in variants))
+    picked = variants
+    if only_variant:
+        hit = [v for v in variants if only_variant in (v.key, v.label, v.name())]
+        if not hit:
+            raise SystemExit(f"没有叫 {only_variant!r} 的模型套；可选："
+                             + "、".join(v.name() for v in variants))
+        picked = hit
+    elif not args.all_variants:
+        picked = variants[:1]
+        if len(variants) > 1:
+            print(f"[mod] 默认只加载第一套（{variants[0].name()}）；"
+                  f"看别的套用 --variant <名字> 或 --all-variants")
+
+    n = 0
+    for v in picked:
+        src = scene_mod.load_mod_sources(mod_dir, variant=v.key)
+        if not src:
+            continue
+        scenes.append(scene_mod.Scene(f"{label_prefix}{v.name()}", src, delta=args.delta,
+                                      textures=tex, material_rules=rules))
+        n += 1
+    return n
+
+
 def build_scenes(args, game) -> list[scene_mod.Scene]:
     scenes: list[scene_mod.Scene] = []
     mod_sources: list[tuple[str, bytes]] = []
@@ -44,38 +100,22 @@ def build_scenes(args, game) -> list[scene_mod.Scene]:
                 mod_sources.append(got)
             else:
                 print(f"[warn] 找不到资产 {p}")
+        if mod_sources:
+            scenes.append(scene_mod.Scene("mod", mod_sources, delta=args.delta))
     elif args.mod:
         mod_dir = Path(args.mod)
         if not mod_dir.exists():
             raise SystemExit(f"mod 目录不存在: {mod_dir}")
-        mod_sources = scene_mod.load_mod_sources(mod_dir)
-        if not mod_sources:
+        if not add_mod_scenes(scenes, mod_dir, args, only_variant=args.variant):
             raise SystemExit(f"{mod_dir} 下没找到 .xac")
 
-    if mod_sources:
-        tex = rules = None
-        if args.mod and Path(args.mod).is_dir():
-            rules = scene_mod.MaterialRules([Path(args.mod)])
-            if not args.no_textures:
-                ts = scene_mod.TextureSet([Path(args.mod)])
-                tex = ts if len(ts) else None
-        scenes.append(scene_mod.Scene("mod", mod_sources, delta=args.delta,
-                                      textures=tex, material_rules=rules))
     if args.compare_mod:
         # 与另一个 mod 对比：迭代时看"上一版 vs 这一版"比看 vanilla 更有用
         other = Path(args.compare_mod)
         if not other.is_dir():
             raise SystemExit(f"对比 mod 目录不存在: {other}")
-        src = scene_mod.load_mod_sources(other)
-        if src:
-            tex = rules = None
-            rules = scene_mod.MaterialRules([other])
-            if not args.no_textures:
-                ts = scene_mod.TextureSet([other])
-                tex = ts if len(ts) else None
-            scenes.append(scene_mod.Scene(f"mod:{other.name}", src, delta=args.delta,
-                                          textures=tex, material_rules=rules))
-    elif args.vanilla or mod_sources:
+        add_mod_scenes(scenes, other, args, label_prefix=f"{other.name}·")
+    elif args.vanilla or scenes:
         van = []
         for ref in (args.vanilla_head or scene_mod.DEFAULT_HEAD,
                     args.vanilla_body or scene_mod.DEFAULT_BODY):
@@ -226,6 +266,11 @@ def run_shots(scenes, anim_list, game, out: str, frames: list[float], args) -> i
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="X4 角色动画预览器（命令行版）")
     ap.add_argument("--mod", help="mod 目录（自动找 head/torso 的 .xac）")
+    ap.add_argument("--variant", help="只用 mod 里的某一套模型（名字见 --list-variants）")
+    ap.add_argument("--all-variants", action="store_true",
+                    help="mod 里每套模型各占一格并排显示（默认只用第一套）")
+    ap.add_argument("--list-variants", action="store_true",
+                    help="列出 mod 目录里的模型套，然后退出（不开窗口）")
     ap.add_argument("--compare-mod", help="与另一个 mod 并排对比（不给则对比 vanilla）")
     ap.add_argument("--body", nargs="*", help="躯干 .xac（磁盘路径或游戏包内路径）")
     ap.add_argument("--head", nargs="*", help="头部 .xac")
@@ -254,6 +299,17 @@ def main(argv=None) -> int:
                     help="出图时不给 mod 侧上贴图（默认上，仅当 --mod 是磁盘目录）")
     ap.add_argument("--no-bones", action="store_true", help="出图时不叠加绿色骨骼线")
     args = ap.parse_args(argv)
+
+    if args.list_variants:
+        if not args.mod:
+            raise SystemExit("--list-variants 要配 --mod <目录>")
+        variants = scene_mod.mod_variants(Path(args.mod))
+        print(f"{args.mod}: {len(variants)} 套模型")
+        for v in variants:
+            print(f"  {v.display():<34} key={v.key}")
+            for p in v.files:
+                print(f"      {p}")
+        return 0
 
     game = x4game.GameArchive()
     scenes = build_scenes(args, game)

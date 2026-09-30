@@ -126,8 +126,22 @@ def static_checks(mod_assets: dict, game) -> tuple[dict, list[str], list[str]]:
     return out, flags, hard
 
 
-def load_mod_assets(mod_dir: Path) -> dict:
-    """按槽位加载 mod 资产。"""
+def load_mod_assets(mod_dir: Path, variant: str | None = None) -> dict:
+    """按槽位加载 mod 资产。
+
+    ``variant`` 指名用哪一套模型（一个 mod 里可以有多套，比如多套装扮或几个角色）。
+    不给时按老规矩 head / torso 各取第一件。
+    """
+    if variant:
+        variants = scene_mod.mod_variants(mod_dir)
+        for v in variants:
+            if variant in (v.key, v.label, v.name()):
+                out = {slot: (v.parts[slot].name, v.parts[slot].read_bytes())
+                       for slot in v.slot_names()}
+                if out:
+                    return out
+        raise SystemExit(f"没有叫 {variant!r} 的模型套；可选："
+                         + "、".join(v.name() for v in variants))
     out: dict = {}
     for path, slot in scene_mod.mod_asset_options(mod_dir):
         if slot in ("head", "torso") and slot not in out:
@@ -142,6 +156,8 @@ def load_mod_assets(mod_dir: Path) -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="X4 mod 动作检查（AI/CI 用）")
     ap.add_argument("--mod", required=True, help="mod 目录（含 head/torso 的 .xac）")
+    ap.add_argument("--variant", default=None,
+                    help="mod 里有好几套模型时，检查哪一套（默认第一套）")
     ap.add_argument("--out", default="report", help="输出目录")
     ap.add_argument("--anims", type=int, default=3, help="检查几条代表性动画")
     ap.add_argument("--samples", type=int, default=6, help="每条动画采样多少帧")
@@ -173,7 +189,11 @@ def main(argv=None) -> int:
     shots_dir.mkdir(parents=True, exist_ok=True)
 
     # -- 1. 资产 ----------------------------------------------------------
-    mod_sources = load_mod_assets(mod_dir)
+    variants = scene_mod.mod_variants(mod_dir)
+    if len(variants) > 1:
+        print(f"这个 mod 里有 {len(variants)} 套模型：" + "、".join(v.name() for v in variants))
+        print(f"  默认只检查第一套（{variants[0].name()}）；换一套用 --variant <名字>")
+    mod_sources = load_mod_assets(mod_dir, args.variant)
     if not mod_sources:
         print(f"{mod_dir} 下没找到 .xac")
         return 2
@@ -207,6 +227,8 @@ def main(argv=None) -> int:
         "tool": "x4-anim-preview/ai_check",
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
         "mod_dir": str(mod_dir),
+        "mod_variant": args.variant or (variants[0].name() if variants else None),
+        "mod_variants": [v.name() for v in variants],
         "mod_assets": {k: v[0] for k, v in mod_sources.items()},
         "elapsed_s": None,
     }

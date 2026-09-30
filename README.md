@@ -8,7 +8,8 @@
 
 ![界面](docs/screenshot.png)
 
-左边是你的 mod，右边是 vanilla，同一条动画、同一时刻。
+左边两格是 mod 里的**两套模型**（同一套骨架、同一条动画、同一时刻），右边是 vanilla 基准。
+mod 里有多套时全部列出来，点一下切换，多选就分屏并排。
 
 ## 运行方式
 
@@ -62,11 +63,22 @@ python tools/studio.py
    输出目录），也支持「浏览…」手动指定。勾上「并排对比」后，**对比对象可以选 vanilla，
    也可以选另一个 mod**——改一版看一版时，跟上一版比通常比跟 vanilla 比更有用。
    改完资产点「重载」即可，不用切来切去。
-2. **播放控制** —— 播放/暂停、逐帧、时间轴拖动、速度、循环、**轮播**（自动过一遍所有动画）、
-   网格/骨骼显示、重置相机、一键截图。
-3. **选择动画** —— 该角色 component 的全部动画（默认 186 条），带搜索框过滤。
+2. **选择模型** —— 一个 mod 里往往不止一套模型（`build_all.py --outfits a,b` 会同时
+   产出 A/B 两套装扮，有些包干脆是几个角色放一起）。列表里**每套都列出来**，
+   **点一下切换显示，多选就分屏并排**；「全选 / 清空」是快捷方式。
+   选择会记住，下次打开还是你上次看的那几套。
 
-选择会被记住（`config.json`），下次打开就是你上次看的 mod 和动画。
+   怎么判断"哪些文件算一套"：先读 mod 的 `libraries/character_macros.xml`，**每条
+   macro 的 `<models>` 就是一套**（和游戏真正加载的一致）；读不到 macro 才退回按
+   文件名前缀分组（`yue_a_head` + `yue_a_body` → `yue_a`），并且要求 heads/ 与
+   bodies/ 属于同一个模型目录，免得把"上一版 / 这一版"混成一套。macro 没引用到的
+   `.xac` 也会单独列出来，不会从列表里消失。
+3. **播放控制** —— 播放/暂停、逐帧、时间轴拖动、速度、循环、**轮播**（自动过一遍所有动画）、
+   网格/骨骼显示、重置相机、一键截图。鼠标拖动是**模型跟着鼠标转**（和 Blender、
+   three.js 一致）；习惯反过来就用底部的「拖动反向」。
+4. **选择动画** —— 该角色 component 的全部动画（默认 186 条），带搜索框过滤。
+
+选择会被记住（`config.json`），下次打开就是你上次看的 mod、模型和动画。
 
 ### 命令行
 
@@ -75,6 +87,11 @@ python tools/viewer.py --vanilla                 # 只跑 vanilla，确认工具
 python tools/viewer.py --mod /path/to/your/mod   # 与 vanilla 并排对比
 python tools/viewer.py --body a.xac --head b.xac # 指定具体资产
 python tools/viewer.py --mod <新版> --compare-mod <上一版>   # 两个 mod 并排（迭代时最有用）
+
+# mod 里有多套模型
+python tools/viewer.py --mod <目录> --list-variants    # 先看有几套、都叫什么
+python tools/viewer.py --mod <目录> --variant yue_b    # 只看其中一套
+python tools/viewer.py --mod <目录> --all-variants     # 每套各占一格
 
 # 不开窗口，批量出图
 python tools/viewer.py --mod /path/to/mod --anim anim_stand_idle_05 \
@@ -92,7 +109,7 @@ python tools/viewer.py --mod /path/to/mod --anim anim_stand_idle_05 \
 | `B` | 叠加骨骼线框（穿透显示，便于核对骨架） |
 | `N` | 只看骨架（隐藏网格） |
 | `R` | 重置相机 |
-| 鼠标拖动 / 滚轮 | 旋转 / 缩放 |
+| 鼠标拖动 / 滚轮 | 旋转（模型跟着鼠标走）/ 缩放 |
 | `Q` / `ESC` | 退出 |
 
 ## 3. 骨架校验
@@ -168,6 +185,12 @@ python tools/ai_check.py --mod <目录> --out report/ \
 
 命令行出图同样支持：`viewer.py --shot out.png --views 6 --elevation -15`。
 
+mod 里有多套模型时，`ai_check.py` 默认只检查第一套，会先把清单打出来；换一套：
+
+```bash
+python tools/ai_check.py --mod <目录> --variant yue_b --out report/
+```
+
 退出码 `0` = ok、`1` = warn、`2` = fail，可直接接进 CI。
 
 判据（越接近 1 越好）：
@@ -193,10 +216,14 @@ python tools/ai_check.py --mod <目录> --out report/ \
 
 ## 5. 资产与动画从哪来
 
-- 网格：`--mod` 目录下的 `.xac`（按文件名含 `head` / `body` 分槽位），也可以给游戏包内路径。
+- 网格：`--mod` 目录下的 `.xac`。哪些算**一套模型**优先看 macro 的 `<models>`
+  （每个 `<macro>` 一套），读不到 macro 才按文件名里的 `head` / `body` 分槽位。
+  一个目录里有好几套时全部列出：GUI 是"模型"列表，命令行是 `--list-variants`。
 - 动画：默认取 macro 实际引用的 component（`character_argon_female_01`）。
   Argon / Terran 等人类种族共用这套骨架和动画，所以 Terran 的 mod 也用它。
   `python tools/animations.py <component名>` 可以列出任意 component 的动画清单。
+- 想单独核对"多套模型有没有被认全"，跑 `python examples/variants_check.py [mod目录…]`：
+  不开窗口、不需要游戏，逐个列出每套模型的槽位与文件，并检查有没有 `.xac` 漏掉。
 
 ## 6. `.xsm` 格式（逆向结果）
 
@@ -238,6 +265,9 @@ python tools/ai_check.py --mod <目录> --out report/ \
 
 ```
 --mod DIR              mod 目录（自动挑 head/torso 的 .xac）
+--variant NAME         只用 mod 里的某一套模型（名字见 --list-variants）
+--all-variants         mod 里每套模型各占一格并排显示
+--list-variants        列出 mod 目录里的模型套，然后退出
 --body / --head FILE   直接指定资产（磁盘路径或游戏包内路径）
 --vanilla              只加载 vanilla 基准
 --vanilla-body/--head  换对照用的 vanilla 槽位资产
@@ -264,6 +294,10 @@ python tools/ai_check.py --mod <目录> --out report/ \
   关节撕裂天然偏高，报警后要对着 `shots/` 的图确认再下结论。
 - 只播**骨骼动画**：morph / 表情（viseme、blendshape）还没做，脸部细节看不到。
 - props 槽位（头发、胡子等）可以当普通资产用 `--body/--head` 传，但没有自动配对。
+- **同屏格数是按宽度均分的**：同时看 4 套以上时每格会很窄（GUI 里"全选"也一样）。
+  默认只在模型不多时全部选中，超过就只选第一套。
+- 一个目录里塞了好几个 mod（比如 `work/dist`）时，重名的模型靠**目录提示**区分
+  （`lumine · x4_lumine_terran_add`）；同一套模型被复制到多处时，取离 macro 最近的那份。
 - 老格式动画（`root/spine1` 命名）不能驱动现役骨架，播放时会提示匹配率。
 - 软光栅出图是 CPU 实现，一张 400×660 约 0.25 s；实时窗口走 OpenGL，不吃这个开销。
 
@@ -274,7 +308,7 @@ run_studio.bat      双击启动图形界面（CRLF 行尾，别改成 LF）
 tools/
   studio.py         图形界面（tkinter 控制面板 + 独立 3D 窗口）   <- 推荐入口
   viewer.py         命令行预览 / 批量出图
-  scene.py          资产定位、场景组装、自动发现 mod 目录
+  scene.py          资产定位、场景组装、自动发现 mod 目录、识别 mod 里的多套模型
   make_shortcut.py  生成 Windows 快捷方式（绕开文件关联问题）
   console.py        统一 UTF-8 控制台（GBK 下打印 ✓ 会直接崩）
   glview.py         OpenGL 视图层：轨道相机、绘制、可手动步进的窗口
@@ -290,6 +324,7 @@ tools/
   render.py         纯 numpy 软光栅（离线出图用）
 examples/
   offline_check.py  不开窗口跑一遍并出图的最小示例
+  variants_check.py 核对"mod 里的多套模型有没有被认全"（不需要游戏）
 ```
 
 图形界面用的是 tkinter（Python 自带）做控制面板、pyglet 单独开三维窗口，
