@@ -207,14 +207,10 @@ def main(argv=None) -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    try:
-        import x4game
-        game = x4game.GameArchive()
-    except Exception as exc:                      # 没装游戏也能跑（只少了自动发现）
-        print(f"\n[skip] 自动发现 mod 目录: {exc}")
-        return 1 if bad else 0
-    for _label, path in scene_mod.discover_mod_dirs(game):
+    for _label, path in scene_mod.discover_mod_dirs():
         bad += report(path)
+    if not scene_mod.discover_mod_dirs():
+        print("\n[note] 工作区里没有可自动发现的 mod 目录")
     return 1 if bad else 0
 
 

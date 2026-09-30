@@ -519,17 +519,19 @@ def has_pack(path: Path) -> bool:
     return bool(modpack.asset_cats(path))
 
 
-def discover_mod_dirs(game: x4game.GameArchive | None = None,
-                      extra_roots: list[Path] | None = None) -> list[tuple[str, Path]]:
-    """找出机器上"可能是 mod"的目录，返回 ``[(标签, 路径)]``。
+def discover_mod_dirs(extra_roots: list[Path] | None = None) -> list[tuple[str, Path]]:
+    """找出**工作区**里"可能是 mod"的目录，返回 ``[(标签, 路径)]``。
 
-    覆盖三类：游戏自己的 ``extensions/``、本工具所在工作区里的 mod 工程输出，
-    以及用户额外指定的根目录。同名只留一个。打包安装（只有 .cat/.dat）的也列出来，
-    标签带"包"字——选它的时候会自动摊开（见 :mod:`modpack`）。
+    只扫工作区根（本工具所在目录的上一级，例如 ``D:\\dsh-x4``）下的各工程输出：
+    那里是你要看的东西，数量有限、启动快。
 
-    官方 DLC（``ego_dlc_*``）不进自动列表：它们一个包 1~2 GB，摊一次几百 MB 且
-    大半是预览用不上的东西；要预览 DLC 角色就用「浏览…」指到
-    ``extensions/ego_dlc_xxx/``（网格会摊开，贴图超过上限时自动跳过）。
+    **不扫游戏的 ``extensions/``**：那里面"人多眼杂"——官方 DLC、工具类 mod、
+    别人做的 mod 全在一起，几十个条目里绝大多数跟人物动作无关，既拖慢启动又刷屏。
+    要预览游戏里装好的 mod，用「浏览…」自己指过去就行；确实想让它常驻列表，
+    把那个目录写进 ``config.json`` 的 ``mod_roots``（见 ``config.example.json``）。
+
+    打包安装（只有 ``.cat``/``.dat``）的也列出来，标签带"包"字——选它时会自动摊开
+    （见 :mod:`modpack`）。
     """
     found: dict[Path, str] = {}
 
@@ -538,7 +540,7 @@ def discover_mod_dirs(game: x4game.GameArchive | None = None,
             path = path.resolve()
         except OSError:
             return
-        if not path.is_dir() or path in found or path.name.lower().startswith("ego_dlc"):
+        if not path.is_dir() or path in found:
             return
         loose = any(iter_files(path, (".xac",), max_depth=6, budget_s=0.5))
         packed = has_pack(path)
@@ -548,31 +550,28 @@ def discover_mod_dirs(game: x4game.GameArchive | None = None,
         # ext_01.cat，那种是散装目录，读的时候根本不会去解包
         found[path] = f"{label}·包" if packed and not loose else label
 
-    roots: list[Path] = []
-    if game is not None:
-        roots.append(game.root / "extensions")
-    roots.append(PROJECT_ROOT.parent)          # 工作区根（D:\dsh-x4）
+    roots = [PROJECT_ROOT.parent]              # 工作区根（D:\dsh-x4）
     roots.extend(extra_roots or [])
-
     for root in roots:
         if not root.is_dir():
             continue
-        if root.name == "extensions":
+        if root.resolve() == PROJECT_ROOT.parent.resolve():
+            # 工作区：各工程的输出目录埋在好几层里，递归找名字像 mod 的目录
             for sub in sorted(root.iterdir()):
-                if sub.is_dir():
-                    add(sub, f"[游戏] {sub.name}")
-            continue
-        # 工作区：递归找含 .xac 的目录，但只认名字里带 x4/mod/角色名的
-        for sub in sorted(root.iterdir()):
-            if not sub.is_dir() or sub.name.startswith("."):
-                continue
-            for cand in sorted(iter_files(sub, (), max_depth=5, budget_s=1.5,
-                                          want_dirs=True)):
-                low = cand.name.lower()
-                if any(k in low for k in ("x4_", "x4-", "_mod", "mod_")):
-                    rel = cand.relative_to(sub).as_posix()
-                    rel = rel if len(rel) <= 34 else "…" + rel[-33:]
-                    add(cand, f"[{sub.name}] {rel}")
+                if not sub.is_dir() or sub.name.startswith("."):
+                    continue
+                for cand in sorted(iter_files(sub, (), max_depth=5, budget_s=1.5,
+                                              want_dirs=True)):
+                    low = cand.name.lower()
+                    if any(k in low for k in ("x4_", "x4-", "_mod", "mod_")):
+                        rel = cand.relative_to(sub).as_posix()
+                        rel = rel if len(rel) <= 34 else "…" + rel[-33:]
+                        add(cand, f"[{sub.name}] {rel}")
+        else:
+            # 额外根（config 的 mod_roots）：当成"装 mod 的目录"，每个子目录就是一个 mod
+            for sub in sorted(root.iterdir()):
+                if sub.is_dir() and not sub.name.startswith("."):
+                    add(sub, f"[{root.name}] {sub.name}")
 
     return [(label, path) for path, label in sorted(found.items(), key=lambda kv: kv[1])]
 

@@ -376,8 +376,24 @@ class StudioApp:
             self.anim_list.selection_set(0)
             self.anim_list.see(0)
 
+    def _extra_mod_roots(self) -> list[Path]:
+        """config.json 的 ``mod_roots``：想让它常驻列表的额外根目录。
+
+        默认（不写这个键）只扫工作区。游戏 ``extensions/`` 不在里面——那里面
+        官方 DLC、工具 mod、别人的 mod 混在一起，几十个条目里没几个用得上。
+        真要常驻就把它的路径写进 ``mod_roots``（相对路径按工程根解析）。
+        """
+        out: list[Path] = []
+        for raw in (self.cfg.get("mod_roots") or []):
+            p = Path(str(raw)).expanduser()
+            if not p.is_absolute():
+                p = PROJECT_ROOT / p
+            if p.is_dir():
+                out.append(p)
+        return out
+
     def _load_mods(self):
-        dirs = scene_mod.discover_mod_dirs(self.game)
+        dirs = scene_mod.discover_mod_dirs(self._extra_mod_roots())
         self.mod_dirs = dirs
         labels = ["（只用 vanilla 基准）"] + [label for label, _ in dirs]
         self.mod_combo.configure(values=labels)
@@ -856,12 +872,40 @@ class StudioApp:
         except Exception as exc:
             self._set_status(f"截图失败：{exc}")
 
+    def browse_start_dir(self) -> str:
+        """「浏览…」从哪个目录开始：默认是工作区根（``D:\\dsh-x4``）。
+
+        记住的上次位置只在**工作区内**、且不在本工具自己的 ``work/`` 里时才用
+        （上次翻到游戏的 ``extensions/``、或停在解包缓存目录里，都不该成为下次的
+        起点）；否则一律回到工作区根。想每次都固定从工作区根开始，把 config.json
+        里的 ``browse_remember`` 设成 false。
+        """
+        root = PROJECT_ROOT.parent
+        remembered = [self.cfg.get("last_browse"),
+                      str(self.current_mod_dir() or "")]
+        if not self.cfg.get("browse_remember", True):
+            remembered = []                       # 只想每次都从工作区根开始
+        for cand in remembered:
+            if not cand:
+                continue
+            p = Path(cand)
+            try:
+                p = p.resolve()
+                if not p.is_dir() or not p.is_relative_to(root):
+                    continue
+                if p.is_relative_to(PROJECT_ROOT / "work"):
+                    continue                      # 解包缓存 / 出图目录，不是 mod 所在
+            except (OSError, ValueError):
+                continue
+            return str(p)
+        return str(root)
+
     def on_browse(self):
-        start = self.cfg.get("last_browse") or str(self.current_mod_dir() or Path.home())
+        start = self.browse_start_dir()
         d = self._pick_directory(start)
         if not d:
             return
-        save_config({"last_browse": d})
+        self._remember({"last_browse": d})
         mod_dir = self._resolve_mod_path(d)
         if mod_dir is None:
             return
