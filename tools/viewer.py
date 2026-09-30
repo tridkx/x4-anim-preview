@@ -7,6 +7,7 @@
 用法::
 
     python tools/viewer.py --mod <mod目录>          # 与 vanilla 并排播放
+    python tools/viewer.py --mod <发布包.zip|.cat>  # 包也行：自动摊到 work/unpacked/
     python tools/viewer.py --vanilla                # 只看 vanilla 基准
     python tools/viewer.py --body a.xac --head b.xac
     python tools/viewer.py --mod <dir> --all-variants        # mod 里每套模型各占一格
@@ -31,9 +32,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import console  # noqa: F401  (设置 UTF-8 控制台)
 import animations as anims_mod
 import glview
+import modpack
 import scene as scene_mod
 import x4game
 import xsm
+
+
+def resolve_mod_dir(path) -> "Path":
+    """目录、``.cat``、``.zip`` 都能当 mod 用：是包就摊开（见 tools/modpack.py）。"""
+    try:
+        return modpack.unpack(path, progress=lambda m: print(f"[mod] {m}"))
+    except Exception as exc:
+        raise SystemExit(f"打不开 {path}：{exc}（要目录，或 .cat/.zip 包）")
 
 
 def mod_textures(mod_dir: Path, args):
@@ -47,11 +57,12 @@ def mod_textures(mod_dir: Path, args):
 
 def add_mod_scenes(scenes: list, mod_dir: Path, args, label_prefix: str = "",
                    only_variant: str | None = None):
-    """把一个 mod 目录加进场景。里面有**多套模型**时默认只加第一套。
+    """把一个 mod 加进场景。里面有**多套模型**时默认只加第一套。
 
     ``--all-variants`` 会把每套各加一格（并排看两套装扮的差别），
     ``--variant`` 则指名一套。返回实际加进去的套数。
     """
+    mod_dir = resolve_mod_dir(mod_dir)
     variants = scene_mod.mod_variants(mod_dir)
     tex, rules = mod_textures(mod_dir, args)
     if not variants:                     # 认不出槽位：退回旧行为（前两件）
@@ -105,15 +116,15 @@ def build_scenes(args, game) -> list[scene_mod.Scene]:
     elif args.mod:
         mod_dir = Path(args.mod)
         if not mod_dir.exists():
-            raise SystemExit(f"mod 目录不存在: {mod_dir}")
+            raise SystemExit(f"mod 路径不存在: {mod_dir}")
         if not add_mod_scenes(scenes, mod_dir, args, only_variant=args.variant):
             raise SystemExit(f"{mod_dir} 下没找到 .xac")
 
     if args.compare_mod:
         # 与另一个 mod 对比：迭代时看"上一版 vs 这一版"比看 vanilla 更有用
         other = Path(args.compare_mod)
-        if not other.is_dir():
-            raise SystemExit(f"对比 mod 目录不存在: {other}")
+        if not other.exists():
+            raise SystemExit(f"对比 mod 路径不存在: {other}")
         add_mod_scenes(scenes, other, args, label_prefix=f"{other.name}·")
     elif args.vanilla or scenes:
         van = []
@@ -302,8 +313,8 @@ def main(argv=None) -> int:
 
     if args.list_variants:
         if not args.mod:
-            raise SystemExit("--list-variants 要配 --mod <目录>")
-        variants = scene_mod.mod_variants(Path(args.mod))
+            raise SystemExit("--list-variants 要配 --mod <目录 / .cat / .zip>")
+        variants = scene_mod.mod_variants(resolve_mod_dir(args.mod))
         print(f"{args.mod}: {len(variants)} 套模型")
         for v in variants:
             print(f"  {v.display():<34} key={v.key}")

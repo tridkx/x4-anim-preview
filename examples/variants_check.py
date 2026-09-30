@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
-"""离线核对："mod 里有多套模型"能不能全部认出来。
+"""离线核对："mod 里有多套模型"能不能全部认出来，以及打包形态能不能摊开。
 
 对着磁盘上现有的 mod 目录跑，不需要游戏、不开窗口::
 
     python examples/variants_check.py [mod目录 …]
 
 不给参数时自动发现机器上的 mod 目录，逐个列出识别到的模型套数。
-还会临时搭一个"两套装扮 + 一条 macro"的假 mod，验证 macro 分组这条路径。
+还会临时搭一个"两套装扮 + 一条 macro"的假 mod，验证 macro 分组这条路径，
+以及把假 mod 打成 ``.cat``/``.dat`` 后能不能照样认全（含贴图超限只摊网格）。
 """
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import sys
 import tempfile
@@ -19,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 import console  # noqa: F401  (设置 UTF-8 控制台)
+import modpack
 import scene as scene_mod
 
 FAKE_MACRO = """<?xml version="1.0" encoding="utf-8"?>
@@ -83,7 +86,60 @@ def fake_mod(root: Path) -> Path:
     (lib / "character_macros.xml").write_text(
         FAKE_MACRO.replace("yueqingshu", "fake").replace("yue_", "fake_"),
         encoding="utf-8")
+    # 一张"贴图"，用来验证超限时先放弃贴图那一条分支
+    tex = mod / "assets" / "characters" / "argon" / "fake" / "textures"
+    tex.mkdir(parents=True, exist_ok=True)
+    (tex / "fake_head_d_diff.gz").write_bytes(b"\x1f\x8b" + b"0" * 4096)
     return mod
+
+
+def pack_dir(src: Path, out_dir: Path) -> Path:
+    """把一个目录打成 X4 的包：``ext_01.cat``（索引）+ ``ext_01.dat``（顺序拼接）。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cat, dat = out_dir / "ext_01.cat", out_dir / "ext_01.dat"
+    lines, blob = [], bytearray()
+    for p in sorted(x for x in src.rglob("*") if x.is_file()):
+        data = p.read_bytes()
+        rel = p.relative_to(src).as_posix()
+        lines.append(f"{rel} {len(data)} {int(p.stat().st_mtime)} "
+                     f"{hashlib.md5(data).hexdigest()}")
+        blob += data
+    cat.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+    dat.write_bytes(bytes(blob))
+    return cat
+
+
+def check_packs(root: Path, fake: Path) -> None:
+    """打包形态：摊开、认全两套、跳过签名包、超限先放弃贴图。"""
+    packed = root / "packed"
+    cat = pack_dir(fake, packed)
+    # 签名包（ext_01_sig.cat）不是资产，不该被当成包
+    shutil.copy(cat, packed / "ext_01_sig.cat")
+    shutil.copy(cat.with_suffix(".dat"), packed / "ext_01_sig.dat")
+    assert [c.name for c in modpack.asset_cats(packed)] == ["ext_01.cat"], \
+        modpack.asset_cats(packed)
+
+    out = modpack.unpack(cat, dest_root=root / "unpacked")
+    labels = [v.label for v in scene_mod.mod_variants(out)]
+    assert labels == ["fake_a", "fake_b"], labels
+    assert (out / "assets/characters/argon/fake/heads/fake_a_head.xac").is_file()
+    print("[ok] .cat/.dat 摊开后仍能认全两套（签名包已跳过）")
+
+    # 同一个包，把上限压到"只够网格"：贴图要被跳过，网格照旧
+    tight = root / "tight"
+    core = sum(s for n, s, _o in modpack.cat_entries(cat)
+               if modpack.wanted(n) and not n.lower().endswith(modpack.TEXTURE_SUFFIXES))
+    modpack.extract_cat(cat, tight, max_bytes=core + 1)
+    assert list(tight.rglob("*.xac")), "网格没摊出来"
+    assert not list(tight.rglob("*.gz")), "贴图超限时应当跳过"
+    print("[ok] 超过上限时只摊网格与 xml，贴图跳过")
+
+    try:
+        modpack.extract_cat(cat, root / "never", max_bytes=1)
+        raise AssertionError("上限太小却没有报错")
+    except ValueError as exc:
+        assert "超过上限" in str(exc)
+    print("[ok] 连网格都超限时明确报错，而不是默默写盘")
 
 
 def report(mod_dir: Path) -> int:
@@ -146,6 +202,8 @@ def main(argv=None) -> int:
         got = scene_mod.load_mod_sources(fake, variant="fake_b")
         assert got and all("fake_b" in name for name, _ in got), got
         print("[ok] load_mod_sources(variant=…) 取到指定那一套")
+
+        check_packs(tmp, fake)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

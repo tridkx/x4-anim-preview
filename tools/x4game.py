@@ -88,7 +88,7 @@ def find_game_root(explicit: str | os.PathLike | None = None) -> Path:
     )
 
 
-def _parse_cat(cat_path: Path):
+def parse_cat(cat_path: Path):
     """一个 .cat 索引行：``name size mtime md5``。"""
     out = []
     with open(cat_path, "rb") as fh:
@@ -129,7 +129,7 @@ class GameArchive:
             cat_path = Path(cat)
             dat_path = cat_path.with_suffix(".dat")
             offset = 0
-            for name, size, mtime, md5 in _parse_cat(cat_path):
+            for name, size, mtime, md5 in parse_cat(cat_path):
                 self.index[name.lower()] = {
                     "name": name,
                     "size": size,

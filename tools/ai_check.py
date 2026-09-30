@@ -8,6 +8,7 @@ AI 还得自己猜哪里有问题。这个脚本把"这版 mod 的动作对不�
 用法::
 
     python tools/ai_check.py --mod <mod目录> --out report/
+    python tools/ai_check.py --mod <发布包.zip|.cat> --out report/    # 包也行，先摊开
     python tools/ai_check.py --mod <mod目录> --out report/ --anims 5 --samples 8
 
 产物::
@@ -41,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import console  # noqa: F401  (设置 UTF-8 控制台)
 import animations as anims_mod
 import metrics as M
+import modpack
 import render as soft
 import scene as scene_mod
 import skeleton_check as skel
@@ -155,7 +157,8 @@ def load_mod_assets(mod_dir: Path, variant: str | None = None) -> dict:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="X4 mod 动作检查（AI/CI 用）")
-    ap.add_argument("--mod", required=True, help="mod 目录（含 head/torso 的 .xac）")
+    ap.add_argument("--mod", required=True,
+                    help="mod 目录，或 .cat / .zip 包（包的 assets 在 .dat 里，会先摊开）")
     ap.add_argument("--variant", default=None,
                     help="mod 里有好几套模型时，检查哪一套（默认第一套）")
     ap.add_argument("--out", default="report", help="输出目录")
@@ -180,8 +183,13 @@ def main(argv=None) -> int:
     t_start = time.time()
     game = x4game.GameArchive()
     mod_dir = Path(args.mod).resolve()
-    if not mod_dir.is_dir():
-        print(f"mod 目录不存在: {mod_dir}")
+    if not mod_dir.exists():
+        print(f"mod 路径不存在: {mod_dir}")
+        return 2
+    try:                       # 目录、.cat、.zip 都行：是包就摊开成目录
+        mod_dir = modpack.unpack(mod_dir, progress=print)
+    except Exception as exc:
+        print(f"打不开 {mod_dir}: {exc}")
         return 2
 
     out_dir = Path(args.out)

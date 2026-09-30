@@ -80,11 +80,46 @@ python tools/studio.py
 
 选择会被记住（`config.json`），下次打开就是你上次看的 mod、模型和动画。
 
+### mod 从哪来：目录 / `.cat` / `.zip` 都行
+
+预览器要的是**散装的目录**：`assets/**/*.xac`、`libraries/character_macros.xml`、
+`libraries/material_library.xml`、贴图 `*.dds.gz`，它按文件名和 xml 去找这些文件。
+
+而 X4 的发布形态是 `<mod>/ext_01.cat`（文本索引：`名字 大小 时间 md5`）
++ `ext_01.dat`（所有 assets 按索引顺序拼在一起），玩家拿到的 `.zip` 里裹的又是这一对
+——**assets 全在 `.dat` 里**，所以把 `.cat` 或 `.zip` 直接指给预览器，它什么都找不到。
+
+现在「浏览…」和命令行的 `--mod` 都能直接吃包：
+
+| 你给的 | 会发生什么 |
+|---|---|
+| 散装目录（有 `.xac`） | 原地读，不复制、不写入 |
+| `ext_01.cat` | 自己找同名 `.dat`，解到 `work/unpacked/<所在目录>_ext_01/` |
+| `.zip` 发布包 | 先解压，再把里面裹着的 `.cat`（通常在 `<mod包名>/` 子目录里）一起解到 `work/unpacked/<包名>/` |
+| 只有 `ext_01.cat/.dat` 的目录 | 同上摊开（**不动你的目录**）。游戏 `extensions/` 里这样装好的 mod 会自动出现在下拉框，标签带「·包」 |
+
+摊开是**有选择的**，不会把整包照抄到硬盘上：
+
+- 只写预览真正会读的：`.xac` 网格、`.xml`（macro / 材质规则）、贴图 `.gz` / `.dds`；
+- 网格 + xml 超过 300 MB 就明确报错，而不是默默写满盘；
+- 只有贴图超限时**先放弃贴图**照常摊开网格（官方 DLC 就是这种：网格 50~110 MB、
+  贴图 200~900 MB），状态栏会写明"贴图超限先跳过（模型会没颜色）"；
+- `ext_01_sig.cat`（签名清单，里面只有一堆 md5）不碰。
+
+摊开是**缓存**的：第二次打开同一个包直接复用（毫秒级），源包更新过（大小/时间戳变了）
+才重解。缓存就在工程内的 `work/unpacked/`（gitignore 已忽略），删掉即可重来。
+多套模型的识别、贴图、材质裁剪规则在摊开后的目录上照常工作。
+
+> 官方 DLC（`extensions/ego_dlc_*`）不进自动列表：一个包 1~2 GB，内容大多是舰船、
+> 音频、脚本，跟人物动作无关。真想看某个 DLC 的角色就「浏览…」指到那个目录，
+> 网格会摊开（贴图大概率被跳过）。
+
 ### 命令行
 
 ```bash
 python tools/viewer.py --vanilla                 # 只跑 vanilla，确认工具链正常
 python tools/viewer.py --mod /path/to/your/mod   # 与 vanilla 并排对比
+python tools/viewer.py --mod <发布包.zip>         # 直接吃 .zip / .cat（自动摊开）
 python tools/viewer.py --body a.xac --head b.xac # 指定具体资产
 python tools/viewer.py --mod <新版> --compare-mod <上一版>   # 两个 mod 并排（迭代时最有用）
 
@@ -216,7 +251,8 @@ python tools/ai_check.py --mod <目录> --variant yue_b --out report/
 
 ## 5. 资产与动画从哪来
 
-- 网格：`--mod` 目录下的 `.xac`。哪些算**一套模型**优先看 macro 的 `<models>`
+- 网格：`--mod` 目录（或 `.cat` / `.zip` 包，见上面"mod 从哪来"）下的 `.xac`。
+  哪些算**一套模型**优先看 macro 的 `<models>`
   （每个 `<macro>` 一套），读不到 macro 才按文件名里的 `head` / `body` 分槽位。
   一个目录里有好几套时全部列出：GUI 是"模型"列表，命令行是 `--list-variants`。
 - 动画：默认取 macro 实际引用的 component（`character_argon_female_01`）。
@@ -264,7 +300,7 @@ python tools/ai_check.py --mod <目录> --variant yue_b --out report/
 ## 7. 参数速查
 
 ```
---mod DIR              mod 目录（自动挑 head/torso 的 .xac）
+--mod PATH             mod 目录，或 .cat / .zip 包（包会摊到 work/unpacked/ 再预览）
 --variant NAME         只用 mod 里的某一套模型（名字见 --list-variants）
 --all-variants         mod 里每套模型各占一格并排显示
 --list-variants        列出 mod 目录里的模型套，然后退出
@@ -296,6 +332,10 @@ python tools/ai_check.py --mod <目录> --variant yue_b --out report/
 - props 槽位（头发、胡子等）可以当普通资产用 `--body/--head` 传，但没有自动配对。
 - **同屏格数是按宽度均分的**：同时看 4 套以上时每格会很窄（GUI 里"全选"也一样）。
   默认只在模型不多时全部选中，超过就只选第一套。
+- 摊开只覆盖预览要用的那几类文件，且**先网格后贴图**：贴图超限会被跳过（模型没颜色，
+  姿态照样能看）。缓存放在 `work/unpacked/`，不用了直接删。
+- `.dat` 单独给没用——它只是数据，索引在同名 `.cat` 里（会明确提示）。
+- 官方 DLC 不进自动列表（包太大、多是舰船/音频），要看得自己「浏览…」指过去。
 - 一个目录里塞了好几个 mod（比如 `work/dist`）时，重名的模型靠**目录提示**区分
   （`lumine · x4_lumine_terran_add`）；同一套模型被复制到多处时，取离 macro 最近的那份。
 - 老格式动画（`root/spine1` 命名）不能驱动现役骨架，播放时会提示匹配率。
@@ -308,6 +348,7 @@ run_studio.bat      双击启动图形界面（CRLF 行尾，别改成 LF）
 tools/
   studio.py         图形界面（tkinter 控制面板 + 独立 3D 窗口）   <- 推荐入口
   viewer.py         命令行预览 / 批量出图
+  modpack.py        .cat/.dat 与 .zip 就地摊开成目录（带缓存）
   scene.py          资产定位、场景组装、自动发现 mod 目录、识别 mod 里的多套模型
   make_shortcut.py  生成 Windows 快捷方式（绕开文件关联问题）
   console.py        统一 UTF-8 控制台（GBK 下打印 ✓ 会直接崩）

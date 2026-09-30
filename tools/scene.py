@@ -11,6 +11,7 @@ import re
 import numpy as np
 
 import ddstex
+import modpack
 import rig as rig_mod
 import x4game
 import xac
@@ -508,12 +509,27 @@ def load_mod_sources(mod_dir: Path, limit: int | None = None, variant: str | Non
     return [(p.name, p.read_bytes()) for p in picked]
 
 
+def has_pack(path: Path) -> bool:
+    """目录里是不是"打包但没散装"的 mod（``ext_01.cat`` + ``ext_01.dat``）。
+
+    游戏 ``extensions/`` 下装好的 mod 大多是这个形态，assets 全在 ``.dat`` 里，
+    按"有没有 .xac"去找会把它们整个漏掉（实测：装了 mod 却不在列表里）。
+    签名包 ``ext_01_sig.cat`` 不算——那里面只有一堆 md5。
+    """
+    return bool(modpack.asset_cats(path))
+
+
 def discover_mod_dirs(game: x4game.GameArchive | None = None,
                       extra_roots: list[Path] | None = None) -> list[tuple[str, Path]]:
     """找出机器上"可能是 mod"的目录，返回 ``[(标签, 路径)]``。
 
     覆盖三类：游戏自己的 ``extensions/``、本工具所在工作区里的 mod 工程输出，
-    以及用户额外指定的根目录。同名只留一个。
+    以及用户额外指定的根目录。同名只留一个。打包安装（只有 .cat/.dat）的也列出来，
+    标签带"包"字——选它的时候会自动摊开（见 :mod:`modpack`）。
+
+    官方 DLC（``ego_dlc_*``）不进自动列表：它们一个包 1~2 GB，摊一次几百 MB 且
+    大半是预览用不上的东西；要预览 DLC 角色就用「浏览…」指到
+    ``extensions/ego_dlc_xxx/``（网格会摊开，贴图超过上限时自动跳过）。
     """
     found: dict[Path, str] = {}
 
@@ -522,11 +538,15 @@ def discover_mod_dirs(game: x4game.GameArchive | None = None,
             path = path.resolve()
         except OSError:
             return
-        if not path.is_dir() or path in found:
+        if not path.is_dir() or path in found or path.name.lower().startswith("ego_dlc"):
             return
-        if not any(iter_files(path, (".xac",), max_depth=6, budget_s=0.5)):
+        loose = any(iter_files(path, (".xac",), max_depth=6, budget_s=0.5))
+        packed = has_pack(path)
+        if not loose and not packed:
             return
-        found[path] = label
+        # 只有"打包且没散装"的才标"·包"：工程输出目录通常既有 assets 又有
+        # ext_01.cat，那种是散装目录，读的时候根本不会去解包
+        found[path] = f"{label}·包" if packed and not loose else label
 
     roots: list[Path] = []
     if game is not None:

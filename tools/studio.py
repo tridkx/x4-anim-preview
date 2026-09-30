@@ -25,6 +25,7 @@ from tkinter import messagebox, ttk
 
 import console  # noqa: F401  (设置 UTF-8 控制台)
 import animations as anims_mod
+import modpack
 import scene as scene_mod
 import glview
 import x4game
@@ -138,6 +139,8 @@ class StudioApp:
         self.picked: set[str] = set()
         self._file_cache: dict[Path, bytes] = {}
         self._materials_cache: dict[Path, tuple] = {}
+        #: 下拉框条目的原始路径 -> 能扫描的目录（打包安装的要先摊开）
+        self._dir_cache: dict[Path, Path] = {}
         self._updating_scale = False
         self._status = "就绪"
         self._closing = False
@@ -388,15 +391,19 @@ class StudioApp:
             for label, path in dirs:
                 if want and str(path) == want:
                     pick = label
-            if pick is None and want and Path(want).is_dir():
-                # config 里记的目录不在自动发现的结果里（名字不像 mod 目录，
-                # 或是手动浏览进来的）：补一条，免得 --mod / 上次的选择失效
-                pick = f"[手动] {Path(want).name}"
-                self.mod_dirs = list(self.mod_dirs) + [(pick, Path(want))]
-                labels = labels + [pick]
-                self.mod_combo.configure(values=labels)
-                self.compare_combo.configure(
-                    values=["vanilla"] + [lab for lab, _ in self.mod_dirs])
+            if pick is None and want and (Path(want).is_dir() or modpack.archive_kind(want)):
+                # config 里记的路径不在自动发现的结果里（名字不像 mod 目录、是手动
+                # 浏览进来的、或者是 .cat/.zip 包）：补一条，免得 --mod / 上次的选择失效
+                resolved = self._resolve_mod_path(want)
+                if resolved is not None:
+                    name = Path(want).name
+                    pick = f"[包] {name}" if modpack.archive_kind(want) else f"[手动] {name}"
+                    self._dir_cache[Path(want)] = resolved
+                    self.mod_dirs = list(self.mod_dirs) + [(pick, Path(want))]
+                    labels = labels + [pick]
+                    self.mod_combo.configure(values=labels)
+                    self.compare_combo.configure(
+                        values=["vanilla"] + [lab for lab, _ in self.mod_dirs])
             self.mod_var.set(pick or (labels[1] if len(labels) > 1 else labels[0]))
         self._set_status(f"发现 {len(dirs)} 个 mod 目录")
         self.rebuild()
@@ -405,8 +412,17 @@ class StudioApp:
         label = self.mod_var.get()
         for lab, path in getattr(self, "mod_dirs", []):
             if lab == label:
-                return path
+                return self._resolved_mod_dir(path)
         return None
+
+    def _resolved_mod_dir(self, path: Path) -> Path | None:
+        """下拉框里的条目可能是散装目录，也可能是**打包安装**的 mod——
+        后者要摊开才能扫（见 :mod:`modpack`）。结果记住，别每次重建都问一遍。"""
+        if path in self._dir_cache:
+            return self._dir_cache[path]
+        out = self._resolve_mod_path(path) or path
+        self._dir_cache[path] = out
+        return out
 
     # -- 模型（一个 mod 里可能有好几套） -----------------------------------
     def _load_variants(self):
@@ -508,22 +524,22 @@ class StudioApp:
         return out
 
     def _pick_directory(self, initial: str) -> str | None:
-        """自己实现的目录选择器。
+        """自己实现的 mod 选择器（目录，或 .cat / .zip 包）。
 
         **不要用 ``filedialog``**：实测连"只开 tkinter、没有 pyglet"的裸环境里
         ``askdirectory`` 都会卡住不返回（对话框根本不弹），和 pyglet 无关。
         这里全部用普通 tkinter 控件搭，不碰任何原生对话框。
         """
         top = tk.Toplevel(self.root)
-        top.title("选择 mod 目录")
+        top.title("选择 mod（目录 / .cat / .zip）")
         top.transient(self.root)
         top.geometry("580x480")
         top.minsize(460, 340)
         result: dict = {"path": None}
         cur = tk.StringVar(value=initial)
 
-        ttk.Label(top, text="路径（可直接粘贴，回车进入）", font=UI_FONT).pack(
-            anchor="w", padx=10, pady=(10, 2))
+        ttk.Label(top, text="路径：目录，或 .cat / .zip 包（可直接粘贴，回车进入）",
+                  font=UI_FONT).pack(anchor="w", padx=10, pady=(10, 2))
         entry = ttk.Entry(top, textvariable=cur, font=MONO_FONT)
         entry.pack(fill="x", padx=10)
 
@@ -538,29 +554,42 @@ class StudioApp:
         listing.pack(side="left", fill="both", expand=True)
         sb.pack(side="left", fill="y")
 
+        def shorten(text: str, width: int = 54) -> str:
+            return text if len(text) <= width else "…" + text[-(width - 1):]
+
         def refresh(*_):
             path = Path(cur.get().strip().strip('"'))
             listing.delete(0, tk.END)
+            if modpack.archive_kind(path):
+                info.configure(text=f"√ 包：{path.name}    确定后自动解包再预览")
+                return
             if not path.is_dir():
-                info.configure(text=f"× 不是目录：{path}")
+                info.configure(text=f"× 不是目录，也不是 .cat/.zip 包：{path}")
                 return
             try:
                 subs = sorted((d for d in path.iterdir() if d.is_dir()),
                               key=lambda d: d.name.lower())
+                packs = sorted((f for f in path.iterdir()
+                                if modpack.archive_kind(f)), key=lambda f: f.name.lower())
             except OSError as exc:
                 info.configure(text=f"× 读不了：{exc}")
                 return
             listing.insert(tk.END, "..")
             for d in subs:
                 listing.insert(tk.END, d.name + "/")
+            for f in packs:
+                listing.insert(tk.END, f.name)
             # 必须有界！对主目录做无界 rglob 会跑几分钟，表现就是卡死
             n_xac = sum(1 for _ in scene_mod.iter_files(path, (".xac",),
                                                         max_depth=6, budget_s=0.4))
-            # 路径太长会撑破窗口，只显示尾部
-            shown = str(path)
-            if len(shown) > 54:
-                shown = "…" + shown[-53:]
-            info.configure(text=f"√ {shown}    子目录 {len(subs)} 个，.xac {n_xac} 个")
+            # 打包形态：目录里只有 ext_01.cat/.dat，确定后会自动摊开
+            cats = [c.name for c in modpack.asset_cats(path)] if not n_xac else []
+            if cats:
+                info.configure(text=f"√ {shorten(str(path))}    只有 {', '.join(cats)}"
+                                    f"（打包形态，确定后自动解包）")
+            else:
+                info.configure(text=f"√ {shorten(str(path))}    子目录 {len(subs)} 个，"
+                                    f".xac {n_xac} 个，包 {len(packs)} 个")
 
         def enter(_event=None):
             sel = listing.curselection()
@@ -573,11 +602,11 @@ class StudioApp:
 
         def confirm(_event=None):
             path = Path(cur.get().strip().strip('"'))
-            if path.is_dir():
+            if path.is_dir() or modpack.archive_kind(path):
                 result["path"] = str(path)
                 top.destroy()
             else:
-                info.configure(text=f"× 不是目录：{path}")
+                info.configure(text=f"× 不是目录，也不是 .cat/.zip 包：{path}")
 
         listing.bind("<Double-Button-1>", enter)
         listing.bind("<Return>", enter)
@@ -833,13 +862,32 @@ class StudioApp:
         if not d:
             return
         save_config({"last_browse": d})
-        label = f"[手动] {Path(d).name}"
+        mod_dir = self._resolve_mod_path(d)
+        if mod_dir is None:
+            return
+        is_pack = modpack.archive_kind(Path(d)) is not None
+        label = (f"[包] {Path(d).name}" if is_pack else f"[手动] {Path(d).name}")
+        self._dir_cache[Path(d)] = mod_dir
         self.mod_dirs = list(getattr(self, "mod_dirs", [])) + [(label, Path(d))]
         labels = ["（只用 vanilla 基准）"] + [l for l, _ in self.mod_dirs]
         self.mod_combo.configure(values=labels)
         self.compare_combo.configure(values=["vanilla"] + [l for l, _ in self.mod_dirs])
         self.mod_var.set(label)
         self.on_mod_change()
+
+    def _resolve_mod_path(self, raw) -> Path | None:
+        """把用户给的路径变成能预览的目录。
+
+        可能是散装目录，也可能是 ``.cat`` / ``.zip`` 包（X4 的发布形态：assets
+        全在 ``ext_01.dat`` 里，``.cat`` 只是索引）——是包就地摊开再用。
+        """
+        try:
+            out = modpack.unpack(raw, progress=self._set_status)
+        except Exception as exc:
+            self._set_status(f"打不开 {Path(str(raw)).name}：{exc}")
+            print(f"[error] 解包失败 {raw}: {exc}")
+            return None
+        return out
 
     def on_mod_change(self):
         self.rebuild()
@@ -848,6 +896,7 @@ class StudioApp:
         """重新读磁盘上的 .xac / 贴图（改完 mod 不用切来切去）。"""
         self.anim_cache.clear()
         self._materials_cache.clear()
+        self._dir_cache.clear()          # 打包的 mod 重建过就重新摊
         self.rebuild()
         self._set_status("已重新加载资产")
 
